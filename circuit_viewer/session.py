@@ -1,0 +1,1340 @@
+"""Turns a spec into pixels, and keeps enough around to do it again quickly.
+
+Orbiting a brain means re-rendering it several times a second, and the only way
+that is affordable is to do the expensive work once.  Three caches, in order of
+how expensive they are to miss:
+
+``_fibers``    loading a 300 MB Lead-DBS MAT takes ten seconds or so.  Keyed on
+               the source and its filters, so dragging the opacity slider on a
+               fibre layer never re-reads the file.
+``_geometry``  voxelising 165 parcel meshes and reducing a volume inside each
+               takes a few seconds.  Keyed on everything that changes the
+               NUMBERS -- mesh, volume, mode, statistic, sign, thresholds --
+               and deliberately not on anything that only changes the COLOURS.
+``_plotter``   one live off-screen render window, actors already added.  A
+               camera move touches none of the above and costs a screenshot.
+
+Every call that touches that render window goes through a single worker thread.
+A GL context belongs to the thread that created it, and a threaded web server
+hands consecutive requests to different threads: without this the second render
+to arrive on a new thread fails with ``eglMakeCurrent: EGL_BAD_ACCESS`` and
+then takes the process down. A lock is not enough -- the requests have to run on
+the *same* thread, not merely one at a time.
+
+The split between geometry keys and style keys is the whole design.  Changing a
+palette or an opacity rebuilds actors from cached geometry, which is fast;
+changing a threshold recomputes, which is not, and should not be triggered by a
+colour picker.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import numpy as np
+
+from .spec import camera_direction, normalize_spec
+
+__all__ = ["RenderSession", "catalogue", "region_names", "side_of", "ink_for"]
+
+
+def region_names(mesh, iso=None, split="auto", presmooth_vox=None):
+    """The regions a group contains, each with its side and its coarse group.
+
+    ``group`` is None for any atlas whose naming this does not recognise, and
+    the panel then offers no supra-region controls rather than one catch-all
+    bucket that would hide half the atlas behind a misleading label.
+    """
+    from calvin_utils.plotting_utils.brains import supra_region
+
+    group = resolve_meshes(mesh, iso=iso, split=split,
+                           presmooth_vox=presmooth_vox)
+    return [{"name": name, "side": side_of(name, part),
+             "group": supra_region(name)}
+            for name, part in group.items()]
+
+
+def region_dir(spec):
+    """The directory of region meshes for a registered set, or None.
+
+    Locally built sets ship beside the package. The yabplot-packaged ones live
+    in yabplot's download cache, and asking yabplot where it put them is what
+    makes aseg, Tian and the Melbourne atlases usable here too rather than being
+    listed and then failing to load.
+    """
+    from calvin_utils.plotting_utils.brains import RESOURCE_DIR
+
+    if "parcels" in spec:
+        path = RESOURCE_DIR / spec["parcels"]
+        return path if path.is_dir() else None
+
+    atlas = spec.get("yabplot_atlas")
+    if not atlas:
+        return None
+    try:
+        from yabplot.data import _find_subcortical_files
+    except Exception:
+        return None
+    try:
+        files = _find_subcortical_files(atlas)
+    except Exception:
+        return None
+    paths = [Path(f) for f in (files or [])]
+    return paths[0].parent if paths else None
+
+# Fields that change the numbers. Anything not listed here is style, and style
+# never invalidates the geometry cache.
+# Geometry is now only geometry: what the meshes ARE. Everything about how they
+# are coloured lives in the overlay stack and is resolved at draw time, so
+# adding a second finding never rebuilds the surfaces.
+_GEOMETRY_KEYS = ("mesh", "tessellate", "iso", "split", "presmooth_vox",
+                  "show_left", "show_right", "hidden_regions", "section",
+                  "section_cap")
+_LOAD_KEYS = ("mesh", "iso", "split", "presmooth_vox")
+_FIBER_KEYS = ("source", "fiber_atlas_path", "sign", "min_abs_value",
+               "max_abs_value", "top_percent", "max_lines", "step", "smooth")
+
+BASE_COLOR = "#b7bcc4"
+
+# Lead-DBS' electrode models, shipped with the viewer so a reconstruction can be
+# opened without a MATLAB install to read them out of.
+ELECTRODE_MODEL_DIR = Path(__file__).resolve().parent / "resources" / "electrodes"
+
+
+def ink_for(background):
+    """Text colour that reads against a given background."""
+    from matplotlib.colors import to_rgb
+
+    try:
+        r, g, b = to_rgb(background)
+    except ValueError:
+        return "#33373d"
+    return "#33373d" if (0.299 * r + 0.587 * g + 0.114 * b) > 0.5 else "#e6e9ef"
+
+
+def side_of(name, mesh, tolerance=4.0):
+    """Which hemisphere a region belongs to: 'L', 'R' or 'M' for midline.
+
+    The name is tried first because an atlas that bothers to say ``_L`` is more
+    reliable than geometry, and a centroid only falls back for meshes that came
+    from a volume and have no naming convention at all. Structures straddling
+    the midline -- vermis, brainstem -- are their own answer rather than being
+    forced to a side, so hiding a hemisphere does not silently take them too.
+    """
+    if name in ("L", "R"):
+        return name
+    stem = str(name).rsplit(".", 1)[0]
+    for suffix, side in (("_L", "L"), ("_R", "R"), ("-L", "L"), ("-R", "R")):
+        if stem.upper().endswith(suffix):
+            return side
+    lowered = stem.lower()
+    if lowered.startswith("left_") or lowered.startswith("lh_"):
+        return "L"
+    if lowered.startswith("right_") or lowered.startswith("rh_"):
+        return "R"
+    try:
+        centre = float(np.asarray(mesh.center)[0])
+    except Exception:
+        return "M"
+    if centre < -tolerance:
+        return "L"
+    if centre > tolerance:
+        return "R"
+    return "M"
+
+
+def section_mesh(mesh, conditions, cap=False):
+    """Cut a mesh in world millimetres. Each condition removes a half-space.
+
+    ``{"axis": "x", "op": ">", "at": -3.0}`` is ``vol(X > -3) = 0``: everything
+    right of x = -3 goes. The cut is left OPEN rather than capped, because a cap
+    carries no region identity and would paint itself with whatever scalar
+    happened to be first -- an open cut shows the real interior and keeps every
+    remaining cell's value honest.
+    """
+    for condition in conditions or ():
+        if not condition.get("enabled", True):
+            continue
+        axis = "xyz".index(condition["axis"])
+        normal = [0.0, 0.0, 0.0]
+        # `clip` keeps the side the normal points AWAY from, so to delete
+        # "greater than" the normal points to increasing coordinate.
+        normal[axis] = 1.0 if condition["op"] == ">" else -1.0
+        origin = [0.0, 0.0, 0.0]
+        origin[axis] = float(condition["at"])
+        try:
+            if cap:
+                # A capped cut is a cross-section: the flat face is real
+                # geometry, and in vertex mode it samples the volume like any
+                # other point, so scrolling a plane through a whole-brain mesh
+                # shows the anatomy on the cut rather than the inside of the
+                # far shell. It is wrong for region colouring -- a cap belongs
+                # to no region and would take whichever scalar came first --
+                # which is why this is a choice and not the default.
+                mesh = mesh.clip_closed_surface(
+                    normal=[-n for n in normal], origin=origin,
+                    inplace=False).triangulate()
+                continue
+            cut = mesh.clip(normal=normal, origin=origin, invert=True)
+            # A clip returns an unstructured grid of mixed cell types; every
+            # filter downstream (decimation especially) wants triangles.
+            mesh = cut.extract_surface().triangulate()
+        except Exception:
+            return None
+        if mesh is None or mesh.n_cells == 0:
+            return None
+    return mesh
+
+
+def _visible_regions(group, layer):
+    """Drop hidden regions and hidden hemispheres before anything is merged."""
+    hidden = set(layer.get("hidden_regions") or ())
+    show = {"L": layer.get("show_left", True), "R": layer.get("show_right", True),
+            "M": True}
+    return {name: mesh for name, mesh in group.items()
+            if name not in hidden and show[side_of(name, mesh)]}
+
+
+def _section_group(group, layer):
+    """Cut every member, dropping any that the cuts remove entirely."""
+    if not any(c.get("enabled", True) for c in (layer.get("section") or ())):
+        return group
+    kept = {}
+    cap = bool(layer.get("section_cap"))
+    for name, mesh in group.items():
+        cut = section_mesh(mesh, layer.get("section"), cap=cap)
+        if cut is not None and cut.n_cells:
+            kept[name] = cut
+    return kept
+
+
+def _auto(value, default):
+    """A layer field of None means 'decide for me'."""
+    return default if value is None else value
+
+
+def _key(layer, fields):
+    return hashlib.sha1(
+        json.dumps([layer.get(f) for f in fields], default=str).encode()
+    ).hexdigest()
+
+
+def catalogue():
+    """What the UI offers in its dropdowns, straight from the mesh registry."""
+    from calvin_utils.plotting_utils.brains import MESHES
+
+    # Some registered region sets are packaged inside yabplot rather than shipped
+    # as meshes on disk. yabplot can draw them; this renderer cannot, because it
+    # needs actual geometry. They stay in the list, marked unavailable, so the
+    # reason is visible in the UI instead of arriving as a load error later.
+    meshes = []
+    for name, spec in MESHES.items():
+        # The registry's own family is what decides the group -- a yabplot
+        # subcortical set is a region set even though it ships no directory, and
+        # classifying it by whether it has one would file it under surfaces and
+        # let it be picked as a cortex.
+        region_set = spec.get("family") == "subcortex"
+        available = (not region_set) or region_dir(spec) is not None
+        meshes.append({
+            "name": name,
+            "what": spec.get("what", ""),
+            "group": "parcels" if region_set else "surface",
+            "available": bool(available),
+        })
+    return {"meshes": meshes,
+            "stats": ["max", "mean_nonzero", "mean", "min", "sum"],
+            "signs": ["both", "positive", "negative"],
+            "modes": ["region", "vertex"],
+            "colorings": ["solid", "direction", "value"]}
+
+
+# A prepared backdrop counts as a volume everywhere a volume is accepted, so
+# one can be meshed and can colour itself without a separate code path.
+VOLUME_SUFFIXES = (".nii", ".nii.gz", ".npz")
+
+
+def is_volume(name):
+    return str(name).lower().endswith(VOLUME_SUFFIXES)
+
+
+def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
+    """Any mesh reference -> an ordered ``{label: PolyData}`` group.
+
+    A single surface, a whole-brain composite and a directory of 165 parcels all
+    come back in the same shape, which is what lets one layer type cover all
+    three. Hemisphere labels are preserved when they exist, because culling the
+    near hemisphere in a lateral view depends on knowing which half is which.
+    """
+    import pyvista as pv
+
+    from calvin_utils.plotting_utils.brains import MESHES
+    from calvin_utils.plotting_utils.mesh_paint import load_parcels
+
+    # Several volumes dropped together are ONE group, not several layers: a set
+    # of ROI files is the same thing as a directory of parcel meshes, and the
+    # whole point of a group is that its members share a palette and a scale.
+    if isinstance(name, (list, tuple)):
+        group, seen = {}, set()
+        for entry in name:
+            part = resolve_meshes(entry, iso=iso, split=split,
+                                  presmooth_vox=presmooth_vox)
+            stem = Path(str(entry)).name.split(".nii")[0]
+            for key, mesh in part.items():
+                label = key if len(name) == 1 or key.startswith(stem) else f"{stem}"
+                while label in seen:
+                    label = f"{label}_"
+                seen.add(label)
+                group[label] = mesh
+        if not group:
+            raise ValueError("none of those volumes produced a surface")
+        return group
+
+    text = str(name)
+    if is_volume(text):
+        # A volume becomes geometry through the same pipeline that built the
+        # SUIT and AAL meshes, so a lesion dropped in today sits beside them and
+        # looks like it belongs rather than like an import.
+        from calvin_utils.plotting_utils.volume_meshes import meshes_from_volume
+
+        meshes, _info = meshes_from_volume(
+            Path(text).expanduser(), iso=iso, split=split,
+            presmooth_vox=presmooth_vox,
+        )
+        return meshes
+
+    spec = MESHES.get(text)
+    if spec is not None and spec.get("family") == "subcortex":
+        directory = region_dir(spec)
+        if directory is None:
+            raise FileNotFoundError(
+                f"{text!r} has no region meshes on this machine. Locally built "
+                "sets live in neuro_plotter_resources; yabplot's own sets are "
+                "downloaded into its cache the first time yabplot draws them."
+            )
+        return load_parcels(directory)
+    if spec is not None:
+        from calvin_utils.plotting_utils.brains import mesh_pieces
+        from calvin_utils.plotting_utils.glass_mesh import build_bmesh
+
+        return build_bmesh(mesh_pieces(text))
+
+    path = Path(text).expanduser()
+    if path.is_dir():
+        return load_parcels(path)
+    if path.is_file():
+        return {path.stem: pv.read(path)}
+    raise FileNotFoundError(f"{text!r} is not a registered mesh, a directory of "
+                            f"meshes, or a file")
+
+
+def _thickness_mm(layer):
+    """Fibre thickness in millimetres, for either quality.
+
+    ``tube_radius`` is the control. ``width`` is the old pixel line width and is
+    only consulted for specs saved before thickness became a physical size, so
+    those keep the look they were saved with.
+    """
+    from calvin_utils.plotting_utils.fiber_render import (
+        TUBE_RADIUS_RANGE, radius_for_width)
+
+    if layer.get("tube_radius"):
+        radius = float(layer["tube_radius"])
+    elif layer.get("width"):
+        radius = radius_for_width(layer["width"])
+    else:
+        radius = 0.2
+    lo, hi = TUBE_RADIUS_RANGE
+    return min(max(radius, lo), hi)
+
+
+class RenderSession:
+    def __init__(self, spec=None):
+        self.spec = normalize_spec(spec or {})
+        self._geometry = {}
+        self._groups = {}    # loaded mesh groups, before any cutting
+        self._fibers = {}
+        self._electrodes = {}   # placed lead geometry, by source
+        self._layer_warnings = {}   # layer id -> complaints, while it lives
+        self._drawing = None        # the layer being built, for warn()
+        self._interiors = {}      # mesh group + step -> interior points
+        self._backdrops = {}      # path -> open Backdrop (slices read on demand)
+        self._plotter = None
+        self._plotter_size = None
+        self._actors = {}         # layer id -> the actors drawn for it
+        self._layer_keys = {}     # layer id -> what it looked like when drawn
+        self._cull_map = {}       # layer id -> [(side, actor)] for hemisphere culling
+        # Resolved (label, cmap, clim) per overlay that asked for a bar, keyed
+        # on the overlay's own content so a stale scale can never be captioned
+        # onto an edited map. Filled while painting, read while rendering --
+        # actors are cached, so the bars cannot be registered from the draw.
+        self._scales = {}
+        self._light_key = None
+        self._slice_state = {}    # layer id -> {axis: [poly, actor, world_mm]}
+        self._gl = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+
+    # -- spec ---------------------------------------------------------------
+    def set_spec(self, spec):
+        self.spec = normalize_spec(spec)
+        return self.spec
+
+    # -- geometry -----------------------------------------------------------
+    def _mesh_geometry(self, layer):
+        cache_key = _key(layer, _GEOMETRY_KEYS)
+        if cache_key in self._geometry:
+            return self._geometry[cache_key]
+
+        # Loading is cached apart from cutting. Meshing a whole-brain volume is
+        # about five seconds and sectioning it is sixty milliseconds, so keying
+        # them together made every drag of the cut slider re-mesh the volume --
+        # a scroll that should be interactive took five seconds a step. These
+        # are the fields that decide what gets LOADED; everything else below
+        # only decides what is shown of it.
+        load_key = _key(layer, _LOAD_KEYS)
+        group = self._groups.get(load_key)
+        if group is None:
+            group = resolve_meshes(layer["mesh"], iso=layer.get("iso"),
+                                   split=layer.get("split", "auto"),
+                                   presmooth_vox=layer.get("presmooth_vox"))
+            self._groups[load_key] = group
+        # Shallow copies, so painting writes to a mesh this render owns. Handing
+        # out the cached originals let a "paint" array from one render survive
+        # into the next: switch an overlay from region to vertex and the stale
+        # per-cell array is still attached where a per-point one is expected,
+        # which surfaces as "Array 'paint' has length (28441) but a length of
+        # (14120) was expected" -- cells against points on the same mesh.
+        group = {name: mesh.copy(deep=False) for name, mesh in group.items()}
+        # The uncut group is kept as well: a region's statistic is a property
+        # of the region, not of how much of it is left after a cut. Sectioning a
+        # parcel open to look inside must not change the number it is showing.
+        full = dict(group)
+        group = _visible_regions(group, layer)
+        if not group:
+            return {"parts": {}, "region_set": False, "group": {},
+                    "full_group": full, "spans": None}
+        hemis = set(group) == {"L", "R"}
+        # A region set is many small meshes; a surface is one or a hemisphere
+        # pair. The distinction decides the whole look, so it is drawn from the
+        # geometry rather than from the layer's name.
+        region_set = not hemis and len(group) > 1
+        reduction = _auto(layer["tessellate"], 0.0)
+        if reduction:
+            from calvin_utils.plotting_utils.mesh_paint import coarsen
+
+            group = coarsen(group, reduction)
+        # Cut last: decimating a cut face rounds off the very edge the section
+        # was made to show.
+        group = _section_group(group, layer)
+        if not group:
+            return {"parts": {}, "region_set": False, "group": {},
+                    "full_group": full, "spans": None}
+
+        if region_set:
+            # One mesh, with each region's cells tagged, so an overlay can flood
+            # a region by writing to its cells and several overlays can be
+            # composited without merging anything again.
+            import pyvista as pv
+
+            names = list(group)
+            meshes = [group[n] for n in names]
+            merged = pv.merge(meshes) if len(meshes) > 1 else meshes[0].copy()
+            spans, at = {}, 0
+            for name, mesh in zip(names, meshes):
+                spans[name] = (at, at + mesh.n_cells)
+                at += mesh.n_cells
+            result = {"parts": {"_": merged}, "region_set": True,
+                      "group": group, "full_group": full, "spans": spans,
+                      "order": names}
+        else:
+            parts = group if hemis else {"_": _merge(list(group.values()))}
+            result = {"parts": parts, "region_set": False, "group": group,
+                      "full_group": full, "spans": None}
+
+        self._geometry[cache_key] = result
+        return result
+
+    def _mesh_colours(self, layer, geom):
+        """Resolve the overlay stack to explicit RGB.
+
+        ONE path, whatever the stack's length. Each overlay is resolved from its
+        own values alone -- its own scale, its own threshold, its own opacity --
+        and composited over the layer's base coat in order, source-over. No
+        overlay can reach another one's scale, and removing one leaves the rest
+        pixel-for-pixel as they were.
+
+        A single overlay used to short-circuit to a scalar field plus a colormap
+        because that bought a colour bar for free. It also meant a stack changed
+        MACHINERY when it changed length: delete the second overlay and the
+        first was suddenly drawn with a clim taken from a different array, no
+        base coat under it, and opacity meaning actor transparency rather than
+        its own contribution. The bar is now built from ``scale_for`` instead.
+        """
+        from calvin_utils.plotting_utils.overlay_paint import (
+            composite, overlay_colours, scale_for,
+        )
+        from matplotlib.colors import to_rgb
+
+        overlays = layer.get("overlays") or []
+        if not overlays:
+            return None
+        stacks = [self._overlay_values(layer, geom, o) for o in overlays]
+
+        base = np.tile(np.asarray(to_rgb(layer["color"]), float),
+                       (len(stacks[0]), 1))
+        painted = composite(base, [overlay_colours(v, o)
+                                   for v, o in zip(stacks, overlays)])
+        for values, overlay in zip(stacks, overlays):
+            self._record_scale(overlay, values)
+        return {"mode": "rgb",
+                "values": (painted * 255).astype(np.uint8),
+                "target": self._target(geom)}
+
+    @staticmethod
+    def _overlay_key(overlay):
+        return json.dumps({k: v for k, v in overlay.items() if k != "id"},
+                          sort_keys=True, default=str)
+
+    def _record_scale(self, overlay, values):
+        """Remember the scale an overlay resolved to, for its colour bar.
+
+        The bar has to be the SAME (cmap, clim) that produced the pixels, or a
+        figure gets captioned with numbers it does not show. It is keyed on the
+        overlay's own content, so editing a threshold or a palette invalidates
+        the caption instead of leaving the old one under a new picture.
+        """
+        if not overlay.get("bar"):
+            return
+        from calvin_utils.plotting_utils.overlay_paint import scale_for
+
+        values = np.asarray(values, float)
+        finite = values[np.isfinite(values)]
+        if not finite.size:
+            return
+        # A bar's title sits ABOVE it, so a long one collides with its
+        # neighbour: keep it short, and drop the extension, which never tells
+        # you which map this is.
+        label = overlay.get("name") or Path(str(overlay.get("nifti") or "")).name
+        for suffix in (".nii.gz", ".nii", ".npz", ".npy"):
+            if label.lower().endswith(suffix):
+                label = label[: -len(suffix)]
+                break
+        self._scales[self._overlay_key(overlay)] = (
+            label, *scale_for(finite, overlay))
+
+    def _bars(self):
+        """(label, cmap, clim) for every overlay asking for a bar, in order.
+
+        Walked off the SPEC rather than collected while drawing, because actors
+        are cached: a layer that did not need redrawing would otherwise lose its
+        bar. Anything whose scale has not been resolved yet is skipped rather
+        than guessed at.
+        """
+        out = []
+        for layer in self.spec["layers"]:
+            if not layer.get("visible", True):
+                continue
+            for overlay in (layer.get("overlays") or []):
+                if not (overlay.get("bar") and overlay.get("nifti")):
+                    continue
+                found = self._scales.get(self._overlay_key(overlay))
+                if found is not None:
+                    out.append(found)
+        return out
+
+    @staticmethod
+    def _target(geom):
+        """Region sets are coloured per CELL; a surface is coloured per point."""
+        return "cells" if geom["region_set"] else "points"
+
+    def _overlay_values(self, layer, geom, overlay):
+        from calvin_utils.plotting_utils.mesh_paint import (
+            parcel_interiors, parcel_stats, sample_nifti, select_regions, _select,
+        )
+
+        mesh = geom["parts"]["_"] if geom["region_set"] else None
+        if not geom["region_set"]:
+            # Sampled and filled PER PART, then concatenated. Filling the joined
+            # array would let a value cross from one mesh to another wherever
+            # their vertices happen to be adjacent in the array, which is not a
+            # relationship on any surface.
+            from calvin_utils.plotting_utils.mesh_paint import fill_gaps
+
+            passes = int(overlay.get("fill_gaps") or 0)
+            out = []
+            for part in geom["parts"].values():
+                values = _select(sample_nifti(part.points, overlay["nifti"]),
+                                 sign=overlay["sign"], absolute=overlay["absolute"],
+                                 threshold=overlay["threshold"],
+                                 max_value=overlay.get("max_value"))
+                if passes:
+                    values = fill_gaps(part, values, passes=passes)
+                out.append(values)
+            return np.concatenate(out) if len(out) > 1 else out[0]
+
+        if overlay["mode"] == "vertex":
+            # On a region set there are no vertices to speak of -- the regions
+            # are the unit -- so a "vertex" overlay samples at cell centres,
+            # which is the finest thing this geometry can actually show.
+            return _select(sample_nifti(mesh.cell_centers().points,
+                                        overlay["nifti"]),
+                           sign=overlay["sign"], absolute=overlay["absolute"],
+                           threshold=overlay["threshold"],
+                           max_value=overlay.get("max_value"))
+
+        step = float(overlay.get("step") or 1.0)
+        # Keyed on the UNCUT group, so sectioning never re-voxelises anything --
+        # cutting is then instant, which is the point of a slider.
+        interior_key = (str(layer["mesh"]), step, _key(layer, ("tessellate",)),
+                        _key(layer, ("show_left", "show_right", "hidden_regions")))
+        full = geom["full_group"]
+        if interior_key not in self._interiors:
+            self._interiors[interior_key] = parcel_interiors(full, step=step)
+
+        values = parcel_stats(
+            full, overlay["nifti"], stat=overlay["stat"], sign=overlay["sign"],
+            absolute=overlay["absolute"], threshold=overlay["threshold"],
+            max_value=overlay["max_value"],
+            step=step, interiors=self._interiors[interior_key],
+        )
+        values = select_regions(values, min_value=overlay["min_value"],
+                                keep_top=overlay["keep_top"])
+
+        # Broadcast each region's value onto the cells that actually survived.
+        out = np.full(mesh.n_cells, np.nan)
+        for name, (begin, end) in geom["spans"].items():
+            out[begin:end] = values.get(name, np.nan)
+        return out
+
+    # -- drawing ------------------------------------------------------------
+    def _ensure_plotter(self, size):
+        import pyvista as pv
+
+        if self._plotter is not None and self._plotter_size == size:
+            return self._plotter
+        if self._plotter is not None:
+            self._plotter.close()
+        self._plotter = pv.Plotter(off_screen=True, window_size=list(size),
+                                   border=False)
+        self._plotter_size = size
+        self._actors.clear()
+        self._layer_keys.clear()
+        self._cull_map.clear()
+        self._slice_state.clear()
+        self._light_key = None
+        return self._plotter
+
+    def _sync_actors(self, pl):
+        """Bring the scene in line with the spec, touching only what changed.
+
+        Rebuilding every actor on every edit is what made a slider feel slow: a
+        slice layer's own work is about 3 ms, while tearing down and re-adding a
+        165-region mesh alongside it costs a hundred. Each layer is keyed on how
+        it was drawn, so moving a slice plane leaves the meshes alone.
+        """
+        from calvin_utils.plotting_utils.render_scene import (
+            add_lights, surface_material,
+        )
+
+        light = self.spec["lighting"]
+        light_key = json.dumps([light, self.spec["center"]], sort_keys=True,
+                               default=str)
+        if light_key != self._light_key:
+            add_lights(pl, key_azimuth=light["key_azimuth"],
+                       key_elevation=light["key_elevation"],
+                       key_intensity=light["key_intensity"],
+                       rig=light.get("rig", "studio"),
+                       center=tuple(self.spec["center"]))
+            self._light_key = light_key
+
+        pl.set_background(self.spec["background"])
+        material = surface_material(
+            specular=light["specular"], specular_power=light["specular_power"],
+            ambient=light["ambient"], diffuse=light["diffuse"],
+        )
+
+        wanted = {}
+        for layer in self.spec["layers"]:
+            if not layer.get("visible", True):
+                continue
+            # A slice PLANE POSITION deliberately stays out of the key: moving
+            # one is an in-place update to an existing actor, and rebuilding the
+            # textured quads instead costs ~60 ms a frame for no difference.
+            structural = {k: v for k, v in layer.items()
+                          if not (layer["kind"] == "slices" and k in "xyz")}
+            # The material is in the key because it comes from the lighting.
+            # Quality deliberately is NOT: it changes pixels, never geometry.
+            wanted[layer["id"]] = (
+                json.dumps([structural, material], sort_keys=True,
+                           default=str),
+                layer)
+
+        for layer_id in list(self._layer_warnings):
+            if layer_id not in wanted:
+                self._layer_warnings.pop(layer_id, None)
+
+        for layer_id in list(self._actors):
+            if (layer_id not in wanted
+                    or self._layer_keys.get(layer_id) != wanted[layer_id][0]):
+                for actor in self._actors.pop(layer_id):
+                    pl.remove_actor(actor, reset_camera=False, render=False)
+                self._layer_keys.pop(layer_id, None)
+                self._cull_map.pop(layer_id, None)
+                self._slice_state.pop(layer_id, None)
+
+        for layer_id, (key, layer) in wanted.items():
+            if layer_id in self._actors:
+                continue
+            self._actors[layer_id] = self._draw_layer(pl, layer, material,
+                                                      ) or []
+            self._layer_keys[layer_id] = key
+
+        self._culls = [pair for layer_id in self._actors
+                       for pair in self._cull_map.get(layer_id, ())]
+        self._move_slices()
+
+    def _move_slices(self):
+        """Re-aim slice planes without touching the actors that draw them.
+
+        A plane move is four point coordinates and one texture. Removing the
+        actor and adding a new one costs about 100 ms; assigning the points and
+        swapping the texture on the actor already there costs about 38 ms.
+        """
+        for layer in self.spec["layers"]:
+            if layer["kind"] != "slices" or not layer.get("visible", True):
+                continue
+            state = self._slice_state.get(layer["id"])
+            if not state or not layer.get("backdrop"):
+                continue
+            back = self.backdrop(layer["backdrop"])
+            lo, hi = back.bounds()
+            middle = (lo + hi) / 2.0
+            for axis, key in enumerate("xyz"):
+                entry = state.get(axis)
+                if entry is None:
+                    continue
+                world_axis, _ = back.world_axis(axis)
+                wanted = layer.get(key)
+                if wanted is None:
+                    wanted = float(middle[world_axis])
+                if abs(float(wanted) - entry[2]) < 1e-9:
+                    continue
+                quad, texture, _landed = back.plane(
+                    axis, float(wanted), cmap=layer.get("cmap"),
+                    transparent_below=layer.get("transparent_below"),
+                    fill=self._slice_fill(layer),
+                    overlays=layer.get("overlays"))
+                entry[0].points = quad.points
+                entry[1].SetTexture(texture)
+                entry[2] = float(wanted)
+
+    def _slice_fill(self, layer):
+        """The colour a slice paints its dropped-out background in, or None.
+
+        Reading it off the scene rather than storing a colour on the layer means
+        switching the background to black does not leave every slice carrying a
+        white plate behind it.
+        """
+        if not layer.get("fill_background"):
+            return None
+        colour = self.spec.get("background") or "#ffffff"
+        from matplotlib.colors import to_rgb
+
+        return tuple(int(round(c * 255)) for c in to_rgb(colour))
+
+    def _draw_layer(self, pl, layer, material):
+        self._drawing = layer["id"]
+        self._layer_warnings.pop(layer["id"], None)
+        if layer["kind"] == "slices":
+            return self._add_slices(pl, layer)
+        if layer["kind"] == "fibers":
+            # A freshly added fibre layer has no file yet. That is a normal
+            # intermediate state, not an error: failing the whole render because
+            # one layer is half-configured would blank the viewport the moment
+            # you click "+ Fiber layer".
+            if not layer.get("source"):
+                return []
+            return self._add_fibers(pl, layer)
+        if layer["kind"] == "electrode":
+            if not layer.get("source"):
+                return []
+            return self._add_electrode(pl, layer, material)
+        return self._add_mesh(pl, layer, material)
+
+    def _add_mesh(self, pl, layer, material):
+        geom = self._mesh_geometry(layer)
+        colours = self._mesh_colours(layer, geom)
+
+        # Geometry is cached by what it IS, not by who is drawing it, so two
+        # layers showing the same mesh are handed the SAME PolyData. Painting
+        # into it directly then means the second layer's colours land on the
+        # first layer's actor -- and, because an actor is only rebuilt when its
+        # own key changes, they stay there after the second layer is deleted.
+        # A shallow copy shares the points and cells (no re-meshing, no extra
+        # memory) while giving each layer its own point_data/cell_data to paint
+        # into, which is the isolation the stack was always assumed to have.
+        parts = {name: part.copy(deep=False)
+                 for name, part in geom["parts"].items()}
+
+        scalars = cmap = clim = None
+        rgb = False
+        if colours is not None:
+            target = colours["target"]
+            values = colours["values"]
+            # Vertex values are sampled over the parts CONCATENATED, in this
+            # same order, so each part gets its own slice. Handing the whole
+            # array to every part is what produced "Array 'paint' has length
+            # (28441) but a length of (14120) was expected" on any two-part
+            # surface -- both hemispheres of a whole brain, painted per vertex.
+            at = 0
+            for name, part in parts.items():
+                store = part.cell_data if target == "cells" else part.point_data
+                other = part.point_data if target == "cells" else part.cell_data
+                # A mesh must never carry both, or VTK picks whichever it finds
+                # first and the lengths disagree.
+                other.pop("paint", None)
+                size = part.n_cells if target == "cells" else part.n_points
+                store["paint"] = (values if len(values) == size
+                                  else values[at:at + size])
+                at += size
+            scalars = "paint"
+            rgb = colours["mode"] == "rgb"
+            cmap, clim = colours.get("cmap"), colours.get("clim")
+
+        gradient = any(o.get("mode") == "vertex"
+                       for o in (layer.get("overlays") or []))
+        faceted = _auto(layer["faceted"], not gradient)
+        edges = _auto(layer["edges"], geom["region_set"] and not gradient)
+        translucent = layer["opacity"] < 1.0
+        # Only when asked. Inferring it from translucency meant a scene that
+        # happened to be see-through started deleting the near hemisphere on its
+        # own, which is startling and, with slices in the scene, looks like the
+        # slices are being eaten rather than the mesh.
+        cullable = (set(parts) == {"L", "R"}
+                    and bool(layer.get("cull_near_hemisphere")))
+
+        actors, culls = [], []
+        for side, mesh in parts.items():
+            actor = pl.add_mesh(
+                mesh, scalars=scalars, cmap=cmap, clim=clim, rgb=rgb,
+                color=None if scalars else layer["color"],
+                nan_color=BASE_COLOR, nan_opacity=1.0,
+                opacity=layer["opacity"],
+                smooth_shading=not faceted,
+                culling="back" if translucent else None,
+                show_scalar_bar=False, **material,
+            )
+            actors.append(actor)
+            if edges:
+                # A separate wireframe actor, not add_mesh(show_edges=True):
+                # VTK multiplies the actor's opacity into its own edges, so a
+                # translucent mesh washes its wireframe out and there is no way
+                # to ask for a faint mesh under a crisp one. Two actors give the
+                # two opacities the independence the eye expects.
+                actors.append(pl.add_mesh(
+                    mesh, style="wireframe", color=layer["edge_color"],
+                    opacity=float(layer["edge_opacity"]),
+                    line_width=float(layer["edge_width"] or 0.6),
+                    lighting=False, show_scalar_bar=False,
+                ))
+            if cullable:
+                culls.append((side, actor))
+        self._cull_map[layer["id"]] = culls
+        return actors
+
+    def backdrop(self, reference):
+        """An open Backdrop, kept for the session so slices stay ~1 ms reads."""
+        from calvin_utils.plotting_utils.backdrops import BACKDROP_DIR, Backdrop
+
+        text = str(reference)
+        path = Path(text).expanduser()
+        if not path.suffix:
+            path = Path(BACKDROP_DIR).expanduser() / f"{text}.npz"
+        key = str(path)
+        if key not in self._backdrops:
+            self._backdrops[key] = Backdrop(path)
+        return self._backdrops[key]
+
+    def _add_slices(self, pl, layer):
+        if not layer.get("backdrop"):
+            return []                   # a freshly added layer has no volume yet
+        back = self.backdrop(layer["backdrop"])
+        lo, hi = back.bounds()
+        middle = (lo + hi) / 2.0
+        actors = []
+        state = {}
+
+        for axis, key in enumerate(("x", "y", "z")):
+            if not layer.get(f"show_{key}", True):
+                continue
+            world_axis, _ = back.world_axis(axis)
+            wanted = layer.get(key)
+            if wanted is None:
+                wanted = float(middle[world_axis])
+            quad, texture, _at = back.plane(
+                axis, float(wanted), cmap=layer.get("cmap"),
+                transparent_below=layer.get("transparent_below"),
+                fill=self._slice_fill(layer),
+                overlays=layer.get("overlays"),
+            )
+            # Unlit on purpose: these are photographs of tissue, and shading
+            # them would add a highlight that means nothing anatomically.
+            actor = pl.add_mesh(quad, texture=texture, lighting=False,
+                                opacity=float(layer["opacity"]),
+                                show_scalar_bar=False)
+            actors.append(actor)
+            state[axis] = [quad, actor, float(wanted)]
+        self._slice_state[layer["id"]] = state
+        return actors
+
+    def _electrode_geometry(self, layer):
+        """``{part name: PolyData}`` for a lead, already placed on the patient.
+
+        Cached on the source and the model override alone. Reading a model file
+        and solving the placement is a fraction of a second, but it is pure
+        geometry: hiding a contact or recolouring the shaft must not redo it.
+        """
+        from calvin_utils.plotting_utils.electrode_render import electrode_meshes
+
+        key = _key(layer, ("source", "model"))
+        group = self._electrodes.get(key)
+        if group is None:
+            group = electrode_meshes(layer["source"], ELECTRODE_MODEL_DIR,
+                                     model=layer.get("model"))
+            self._electrodes[key] = group
+        hidden = set(layer.get("hidden_regions") or ())
+        return {name: mesh for name, mesh in group.items() if name not in hidden}
+
+    def _add_electrode(self, pl, layer, material):
+        """Two actors: the shaft and the contacts, each in its own colour."""
+        group = self._electrode_geometry(layer)
+        actors = []
+        for kind, colour in (("insulation", layer["insulation_color"]),
+                             ("contacts", layer["contact_color"])):
+            parts = [m for name, m in group.items() if kind in name]
+            if not parts:
+                continue
+            merged = parts[0]
+            for extra in parts[1:]:
+                merged = merged.merge(extra)
+            actors.append(pl.add_mesh(
+                merged, color=colour, opacity=float(layer["opacity"]),
+                smooth_shading=True, show_scalar_bar=False, **material))
+        return actors
+
+    def _fiber_geometry(self, layer):
+        """The streamlines for a fibre layer, as (mesh, is_tubed).
+
+        Two caches, because they cost very different amounts. Reading and
+        smoothing a Lead-DBS MAT takes ten seconds or so and is keyed on the
+        selection; sweeping those polylines into real tubes multiplies the point
+        count by ~8 and is only worth it for a screenshot. Preview draws the
+        lines with ``render_lines_as_tubes``, which is a shading trick on line
+        primitives -- fast, and flat under a moving light, because a line has no
+        surface to catch it. Hi-res draws actual swept geometry with normals,
+        which is where the sheen comes from.
+        """
+        from calvin_utils.plotting_utils.fiber_render import (
+            line_width_for_radius, load_fibers, radius_for_width, tube_fibers)
+
+        key = _key(layer, _FIBER_KEYS)
+        entry = self._fibers.get(key)
+        if entry is None:
+            poly = load_fibers(
+                layer["source"],
+                fiber_atlas_path=layer.get("fiber_atlas_path"),
+                sign=layer.get("sign", "both"),
+                min_abs_value=layer.get("min_abs_value"),
+                max_abs_value=layer.get("max_abs_value"),
+                top_percent=layer.get("top_percent"),
+                max_lines=layer.get("max_lines"),
+                step=int(layer.get("step") or 1),
+                smooth=int(layer.get("smooth") or 0),
+            )
+            entry = {"lines": poly, "tubes": None, "tube_shape": None}
+            self._fibers[key] = entry
+
+        # Hiding the unpainted atlas fibres happens HERE, on the streamlines,
+        # before anything is swept. Doing it after tubing did nothing at all:
+        # a tube is polygons, and the filter walks poly.lines, which a tubed
+        # mesh does not have -- so preview filtered and export did not, and the
+        # two diverged silently. Filtering first also means the tubes are only
+        # built for fibres that will be drawn.
+        lines = entry["lines"]
+        # Gates first: they are geometry, and pruning before the value filter
+        # means the "no fibres carry a value" warning is about what is actually
+        # left rather than about the whole atlas.
+        gates = [g for g in (layer.get("prune") or []) if g.get("enabled", True)]
+        if gates:
+            from calvin_utils.plotting_utils.fiber_render import prune_streamlines
+
+            pruned = prune_streamlines(lines, gates)
+            if pruned is None:
+                self.warn(f"{layer['name']} — no fibres satisfy the gates")
+            else:
+                lines = pruned
+        if layer.get("values_only"):
+            lines = self._painted_fibers(layer, lines) or lines
+
+        # Tubes are a property of the LAYER, not of the render. Making it a
+        # render mode is what let preview and export disagree about which
+        # fibres were drawn; now there is one scene, and an export is the same
+        # scene with more pixels and better antialiasing.
+        if not layer.get("tubes"):
+            return lines, False
+
+        # Thickness is a style field, so it is deliberately not in _FIBER_KEYS --
+        # dragging it must not re-read the tractogram. It does change the swept
+        # geometry though, so the tube cache carries its own key -- and so does
+        # the selection, or the export would reuse tubes built for a different
+        # set of fibres.
+        radius = _thickness_mm(layer)
+        sides = int(layer.get("tube_sides") or 8)
+        shape = (round(radius, 4), sides, int(lines.n_points),
+                 _key(layer, ("prune",)),
+                 _key(layer, ("values_only",)),
+                 json.dumps([o.get("nifti") for o in (layer.get("overlays") or [])],
+                            sort_keys=True, default=str))
+        if entry["tubes"] is None or entry["tube_shape"] != shape:
+            entry["tubes"] = tube_fibers(lines, radius=radius, sides=sides)
+            entry["tube_shape"] = shape
+        return entry["tubes"], True
+
+    def _add_fibers(self, pl, layer):
+        from calvin_utils.plotting_utils.fiber_render import (
+            FIBER_MATERIAL, line_width_for_radius)
+        from calvin_utils.plotting_utils.render_scene import resolve_scale
+
+        poly, tubed = self._fiber_geometry(layer)
+        kw = dict(opacity=float(layer["opacity"]), lighting=True,
+                  show_scalar_bar=False, **FIBER_MATERIAL)
+
+        painted = self._fiber_overlays(layer, poly)
+        if painted is not None:
+            poly = poly.copy(deep=False)
+            poly["paint"] = painted
+            if tubed:
+                kw["smooth_shading"] = True
+            else:
+                kw.update(line_width=line_width_for_radius(_thickness_mm(layer)),
+                          render_lines_as_tubes=True)
+            return [pl.add_mesh(poly, scalars="paint", rgb=True, **kw)]
+        if tubed:
+            kw["smooth_shading"] = True
+        else:
+            from calvin_utils.plotting_utils.fiber_render import line_width_for_radius
+
+            kw.update(line_width=line_width_for_radius(_thickness_mm(layer)),
+                      render_lines_as_tubes=True)
+        if layer["coloring"] == "direction":
+            return [pl.add_mesh(poly, scalars="dir", rgb=True, **kw)]
+        if layer["coloring"] == "value":
+            cmap, clim = resolve_scale(np.asarray(poly["vals"]),
+                                       cmap=layer["palette"], clim=layer["clim"],
+                                       color=layer["color"])
+            return [pl.add_mesh(poly, scalars="vals", cmap=cmap, clim=clim, **kw)]
+        return [pl.add_mesh(poly, color=layer["color"], **kw)]
+
+    @property
+    def warnings(self):
+        """Every live layer's complaints, in layer order."""
+        out = []
+        for layer in self.spec["layers"]:
+            out.extend(self._layer_warnings.get(layer["id"], ()))
+        return out
+
+    def warn(self, message):
+        """Record something the figure should say without failing the render.
+
+        A bad file in one layer is normal while a figure is being built. The
+        render still has to produce the other layers, so these are collected and
+        handed back beside the image rather than raised.
+
+        Kept against the LAYER, not the render. Actors are cached, so a layer is
+        only rebuilt when something about it changes; a warning tied to one
+        render would appear once and then be wiped by the next orbit, leaving a
+        layer silently unpainted. This way it stands until the layer is rebuilt
+        without it.
+        """
+        bucket = self._layer_warnings.setdefault(self._drawing, [])
+        if message not in bucket:
+            bucket.append(str(message))
+
+    def _painted_fibers(self, layer, poly):
+        """Keep only the streamlines some overlay has a value for.
+
+        Dropping them rather than making them transparent, because on a
+        whole-atlas tractogram the fibres a result says nothing about are the
+        overwhelming majority: not drawing them is both the clearer picture and
+        the far cheaper one.
+
+        A fibre survives if ANY overlay paints it, so a stack still composites
+        normally -- this removes what none of them reach, not what the topmost
+        one misses.
+        """
+        from calvin_utils.plotting_utils.fiber_render import streamline_values
+        from calvin_utils.plotting_utils.mesh_paint import _select
+        from calvin_utils.plotting_utils.overlay_paint import overlay_colours
+
+        overlays = [o for o in (layer.get("overlays") or []) if o.get("nifti")]
+        if not overlays:
+            return None
+
+        held = poly.field_data.get("atlas_fibers")
+        count = int(np.asarray(held).ravel()[0]) if held is not None else None
+        keep = None
+        for overlay in overlays:
+            try:
+                values = streamline_values(overlay["nifti"], count=count)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                self.warn(f"{layer['name']} — {exc}")
+                continue
+            values = _select(values, sign=overlay["sign"],
+                             absolute=overlay["absolute"],
+                             threshold=overlay["threshold"],
+                             max_value=overlay.get("max_value"))
+            # The ALPHA an overlay would paint, not merely whether a value
+            # survived processing. Checking finiteness ignored the colour scale
+            # entirely, so raising Colour min washed fibres to the bottom colour
+            # instead of dropping them -- they had values, they just had no
+            # colour left. Alpha is what "this overlay paints nothing here"
+            # actually means, and it accounts for clim and Skip below min.
+            _rgb, alpha = overlay_colours(values, overlay)
+            alive = np.asarray(alpha) > 0.0
+            keep = alive if keep is None else (keep | alive)
+        if keep is None or keep.all():
+            return None
+
+        owner = np.asarray(poly["fiber"])
+        wanted = keep[owner]
+        # Walk the line array rather than filtering points: a streamline is one
+        # cell, and keeping a subset of its points would stitch the survivors
+        # into a line that runs through places no fibre goes.
+        lines, out, points = poly.lines, [], []
+        cursor = i = 0
+        remap = {}
+        while i < len(lines):
+            n = int(lines[i])
+            ids = lines[i + 1:i + 1 + n]
+            if wanted[ids[0]]:
+                for pid in ids:
+                    if pid not in remap:
+                        remap[pid] = cursor + len(points)
+                        points.append(pid)
+                out.append(np.r_[n, [remap[pid] for pid in ids]])
+            i += 1 + n
+        if not out:
+            self.warn(f"{layer['name']} — no fibres carry a value; showing all")
+            return None
+
+        import pyvista as pv
+
+        index = np.asarray(points, np.int64)
+        kept = pv.PolyData()
+        kept.points = np.asarray(poly.points)[index]
+        kept.lines = np.concatenate(out)
+        for name in ("vals", "fiber", "dir"):
+            if name in poly.point_data:
+                kept[name] = np.asarray(poly[name])[index]
+        kept.field_data["atlas_fibers"] = np.array([count or 0], dtype=np.int64)
+        return kept
+
+    def _fiber_overlays(self, layer, poly):
+        """Per-point RGB for a fibre layer's overlay stack, or None.
+
+        Each overlay is one value per ATLAS fibre. ``poly["fiber"]`` says which
+        atlas fibre every point came from, which is what survives subsampling
+        and thresholding -- joining on position in the array would silently
+        colour the wrong bundles once any fibre had been dropped.
+
+        The layer's own colouring is the base, and the stack paints over it, so
+        a bundle can carry a background that later findings overwrite exactly
+        where they have something to say and nowhere else.
+        """
+        from calvin_utils.plotting_utils.fiber_render import streamline_values
+        from calvin_utils.plotting_utils.mesh_paint import _select
+        from calvin_utils.plotting_utils.overlay_paint import (
+            composite, overlay_colours,
+        )
+        from matplotlib.colors import to_rgb
+
+        overlays = [o for o in (layer.get("overlays") or []) if o.get("nifti")]
+        if not overlays:
+            return None
+
+        owner = np.asarray(poly["fiber"])
+        held = poly.field_data.get("atlas_fibers")
+        count = int(np.asarray(held).ravel()[0]) if held is not None else None
+        stack = []
+        for overlay in overlays:
+            try:
+                values = streamline_values(overlay["nifti"], count=count)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                # A values file that does not fit this atlas is skipped, not
+                # fatal: blanking the whole figure would hide the layers that
+                # are fine and say nothing about which file was wrong.
+                # The message already names the file, so do not prefix it again.
+                self.warn(f"{layer['name']} — {exc}")
+                continue
+            values = _select(values, sign=overlay["sign"],
+                             absolute=overlay["absolute"],
+                             threshold=overlay["threshold"],
+                             max_value=overlay.get("max_value"))
+            self._record_scale(overlay, values)
+            stack.append(overlay_colours(values[owner], overlay))
+        if not stack:
+            return None
+
+        if layer["coloring"] == "direction":
+            base = np.asarray(poly["dir"], float) / 255.0
+        else:
+            base = np.tile(np.asarray(to_rgb(layer["color"]), float),
+                           (poly.n_points, 1))
+        return (composite(base, stack) * 255).astype(np.uint8)
+
+    # -- rendering ----------------------------------------------------------
+    def render(self, *args, **kwargs):
+        """Render the current spec and return PNG bytes.
+
+        The work is handed to the render thread and waited on, so callers can be
+        on whatever thread the web server gave them.
+        """
+        return self._gl.submit(self._render, *args, **kwargs).result()
+
+    def _render(self, size=(760, 640), quality="preview", scalar_bar=True,
+                camera=None, antialias=None):
+        size = (int(size[0]), int(size[1]))
+        pl = self._ensure_plotter(size)
+
+        self._sync_actors(pl)
+
+        cam = dict(self.spec["camera"], **(camera or {}))
+        d, up = camera_direction(cam["azimuth"], cam["elevation"])
+        centre = np.asarray(self.spec["center"], float)
+
+        # Hemisphere culling follows the camera, not a named view: whichever
+        # half is between the lens and the brain is the one that stacks.
+        for side, actor in getattr(self, "_culls", []):
+            near = "L" if d[0] < 0 else "R"
+            actor.visibility = not (abs(d[0]) > 0.5 and side == near)
+
+        pl.camera_position = [tuple(centre + d * self.spec["distance"]),
+                              tuple(centre), tuple(up)]
+        # Fit to the actual viewport before zooming. The window is whatever
+        # shape the browser pane is, and a fixed distance that frames a brain
+        # nicely in a square crops it badly in a wide one; reset_camera keeps
+        # the direction just set and solves the framing for this aspect ratio.
+        # Parallel projection is what the earlier figures used, and it is the
+        # honest choice for a figure someone will measure by eye: two regions
+        # the same size render the same size whatever their depth.
+        pl.camera.parallel_projection = bool(self.spec.get("parallel", True))
+        pl.reset_camera()
+        pl.camera.zoom(float(cam["zoom"]))
+
+        # Removal has to be BY TITLE: remove_scalar_bar() with no argument
+        # raises as soon as more than one bar is present, which is exactly the
+        # two-map case this exists for.
+        # .keys() explicitly: pyvista's ScalarBars is a mapping with no
+        # __iter__, so iterating it falls back to the sequence protocol and
+        # asks for item 0 -- "KeyError: 0" the moment a bar already exists.
+        existing = getattr(pl, "scalar_bars", None)
+        for title in list(existing.keys()) if existing is not None else []:
+            try:
+                pl.remove_scalar_bar(title)
+            except Exception:
+                pass
+        if scalar_bar:
+            # Bar text has to read against whatever the background is; a dark
+            # label on a black backdrop is an invisible colour bar. Several
+            # bars stack in from the right edge, first overlay outermost, so a
+            # two-map figure carries both scales instead of one caption that
+            # only happens to be true of one of them.
+            ink = ink_for(self.spec["background"])
+            bars = self._bars()
+            self._bar_mappers = []      # held, or VTK collects them mid-render
+            # One bar stands vertically at the right edge, which suits a tall
+            # brain. Two or more STACK HORIZONTALLY instead: a vertical bar's
+            # title sits above it, so side-by-side bars overwrite each other's
+            # labels -- and with two maps the label is the whole point.
+            stacked = len(bars) > 1
+            for i, (label, cmap, clim) in enumerate(bars):
+                mapper = _bar_mapper_for(cmap, clim)
+                self._bar_mappers.append(mapper)
+                # pyvista keys its bars by title, and two overlays very often
+                # carry the SAME filename, so a bare label would collide and
+                # the second bar would replace the first. Trailing spaces make
+                # the key unique and render as nothing.
+                title = str(label)[:22] + " " * i
+                if stacked:
+                    place = dict(vertical=False, width=0.26, height=0.045,
+                                 position_x=0.70,
+                                 position_y=0.06 + i * 0.13)
+                else:
+                    place = dict(vertical=True, width=0.03, height=0.55,
+                                 position_x=0.90, position_y=0.22)
+                pl.add_scalar_bar(mapper=mapper, title=title, color=ink,
+                                  label_font_size=12, title_font_size=11,
+                                  n_labels=4, fmt="%.3g", **place)
+
+        # Geometry quality and anti-aliasing are separate choices. Supersampling
+        # 3 M points of tube geometry costs seconds, which is right for the file
+        # you are going to publish and wrong for looking at it on screen, so the
+        # hi-res TOGGLE gets real tubes with cheap AA and only the export pays
+        # for both.
+        if antialias is None:
+            antialias = "ssaa" if quality == "export" else "off"
+        if antialias == "ssaa":
+            pl.enable_anti_aliasing("ssaa")
+        elif antialias == "fxaa":
+            pl.enable_anti_aliasing("fxaa")
+        else:
+            pl.disable_anti_aliasing()
+
+        # A reused off-screen Plotter hands back the LAST RENDERED buffer:
+        # screenshot() does not re-render for a camera move, so without this the
+        # viewport silently freezes on the first frame while every orbit appears
+        # to succeed. Found by diffing consecutive frames, not by watching it.
+        pl.render()
+        image = pl.screenshot(return_img=True)
+        return _png(image, fast=quality != "export")
+
+    def export(self, path, size=(1700, 1400), scalar_bar=True, camera=None):
+        Path(path).expanduser().write_bytes(
+            self.render(size=size, quality="export", scalar_bar=scalar_bar,
+                        camera=camera, antialias="ssaa")
+        )
+        return str(Path(path).expanduser())
+
+
+def _bar_mapper_for(cmap, clim):
+    """A mapper that exists only to carry a lookup table to add_scalar_bar."""
+    import pyvista as pv
+    import vtk
+
+    lut = pv.LookupTable(cmap=cmap)
+    lut.scalar_range = (float(clim[0]), float(clim[1]))
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetLookupTable(lut)
+    mapper.SetScalarRange(float(clim[0]), float(clim[1]))
+    return mapper
+
+
+def _merge(meshes):
+    meshes = [m for m in meshes if m.n_points]
+    out = meshes[0].copy()
+    for extra in meshes[1:]:
+        out = out.merge(extra)
+    return out
+
+
+def _png(image, fast=False):
+    """PNG bytes. Previews go over localhost, so spending 27 ms squeezing them
+    smaller is 27 ms taken straight out of the frame rate."""
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.fromarray(np.asarray(image, dtype=np.uint8)).save(
+        buffer, format="PNG", compress_level=1 if fast else 6)
+    return buffer.getvalue()

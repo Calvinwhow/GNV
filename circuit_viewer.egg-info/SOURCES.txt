@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+circuit_viewer/__init__.py
+circuit_viewer/__main__.py
+circuit_viewer/app.py
+circuit_viewer/session.py
+circuit_viewer/spec.py
+circuit_viewer/volume_info.py
+circuit_viewer.egg-info/PKG-INFO
+circuit_viewer.egg-info/SOURCES.txt
+circuit_viewer.egg-info/dependency_links.txt
+circuit_viewer.egg-info/entry_points.txt
+circuit_viewer.egg-info/requires.txt
+circuit_viewer.egg-info/top_level.txt
+circuit_viewer/static/app.js
+circuit_viewer/static/index.html

@@ -1,0 +1,2 @@
+[console_scripts]
+circuit-viewer = circuit_viewer.app:main

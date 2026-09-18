@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "circuit-viewer"
+version = "0.1.0"
+description = "Layered brain-figure viewer: meshes, volumes and tractograms as editable layers."
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.0",
+    "pyvista>=0.44",
+    "nibabel",
+    "scipy",
+    "numpy",
+    "pillow",
+    "matplotlib",
+]
+
+[project.scripts]
+circuit-viewer = "circuit_viewer.app:main"
+
+[tool.setuptools.packages.find]
+include = ["circuit_viewer*"]
+
+[tool.setuptools.package-data]
+circuit_viewer = ["static/*"]

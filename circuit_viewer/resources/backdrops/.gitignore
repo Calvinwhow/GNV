@@ -1,0 +1,3 @@
+# Generated backdrop archives and temporary conversion scratch files.
+*.npz
+*.building.raw
