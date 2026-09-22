@@ -212,6 +212,16 @@ def _section_group(group, layer):
     return kept
 
 
+def _fills(overlays):
+    """The overlays that paint a surface; outline overlays only trace one."""
+    return [o for o in (overlays or []) if o.get("draw", "fill") != "outline"]
+
+
+def _outlines(overlays):
+    return [o for o in (overlays or [])
+            if o.get("draw") == "outline" and o.get("nifti")]
+
+
 def _auto(value, default):
     """A layer field of None means 'decide for me'."""
     return default if value is None else value
@@ -477,7 +487,7 @@ class RenderSession:
         )
         from matplotlib.colors import to_rgb
 
-        overlays = layer.get("overlays") or []
+        overlays = _fills(layer.get("overlays"))
         if not overlays:
             return None
         stacks = [self._overlay_values(layer, geom, o) for o in overlays]
@@ -536,8 +546,10 @@ class RenderSession:
         for layer in self.spec["layers"]:
             if not layer.get("visible", True):
                 continue
+            if layer["kind"] == "fibers" and layer.get("coloring", "solid") != "value":
+                continue            # solid / direction paint no value ramp
             for overlay in (layer.get("overlays") or []):
-                if not (overlay.get("bar") and overlay.get("nifti")):
+                if not (overlay.get("bar") and overlay.get("nifti")) or overlay.get("draw") == "outline":
                     continue
                 found = self._scales.get(self._overlay_key(overlay))
                 if found is not None:
@@ -725,7 +737,7 @@ class RenderSession:
                     axis, float(wanted), cmap=layer.get("cmap"),
                     transparent_below=layer.get("transparent_below"),
                     fill=self._slice_fill(layer),
-                    overlays=layer.get("overlays"))
+                    overlays=_fills(layer.get("overlays")))
                 entry[0].points = quad.points
                 entry[1].SetTexture(texture)
                 entry[2] = float(wanted)
@@ -756,7 +768,7 @@ class RenderSession:
             # you click "+ Fiber layer".
             if not layer.get("source"):
                 return []
-            return self._add_fibers(pl, layer)
+            return self._add_fibers(pl, layer, material)
         if layer["kind"] == "electrode":
             if not layer.get("source"):
                 return []
@@ -804,7 +816,7 @@ class RenderSession:
             cmap, clim = colours.get("cmap"), colours.get("clim")
 
         gradient = any(o.get("mode") == "vertex"
-                       for o in (layer.get("overlays") or []))
+                       for o in _fills(layer.get("overlays")))
         faceted = _auto(layer["faceted"], not gradient)
         edges = _auto(layer["edges"], geom["region_set"] and not gradient)
         translucent = layer["opacity"] < 1.0
@@ -841,8 +853,40 @@ class RenderSession:
                 ))
             if cullable:
                 culls.append((side, actor))
+            for overlay in _outlines(layer.get("overlays")):
+                line_actor = self._add_outline(pl, mesh, overlay)
+                if line_actor is not None:
+                    actors.append(line_actor)
+                    if cullable:
+                        culls.append((side, line_actor))
         self._cull_map[layer["id"]] = culls
         return actors
+
+    def _add_outline(self, pl, mesh, overlay):
+        """Trace where ``overlay`` selects anything, as lines on ``mesh``.
+
+        Nothing is painted: the overlay's sign, absolute and threshold / max
+        decide what is inside exactly as they would for a fill, and the edge of
+        that region is drawn in the overlay's colour.
+        """
+        from calvin_utils.plotting_utils.mesh_paint import outline_lines
+
+        try:
+            lines = outline_lines(
+                mesh, overlay["nifti"], sign=overlay["sign"],
+                absolute=overlay["absolute"], threshold=overlay["threshold"],
+                max_value=overlay.get("max_value"),
+                smooth_vox=overlay.get("outline_smooth", 1.0))
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            self.warn(f"outline {overlay.get('name') or overlay['nifti']}: {exc}")
+            return None
+        if not lines.n_points:
+            return None
+        return pl.add_mesh(lines, color=overlay["color"],
+                           opacity=float(overlay.get("opacity", 1.0)),
+                           line_width=float(overlay.get("outline_width", 3.0)),
+                           render_lines_as_tubes=True, lighting=False,
+                           show_scalar_bar=False)
 
     def backdrop(self, reference):
         """An open Backdrop, kept for the session so slices stay ~1 ms reads."""
@@ -860,6 +904,9 @@ class RenderSession:
     def _add_slices(self, pl, layer):
         if not layer.get("backdrop"):
             return []                   # a freshly added layer has no volume yet
+        if _outlines(layer.get("overlays")):
+            self.warn("outline overlays are drawn on mesh layers only; "
+                      "skipped on this slice layer")
         back = self.backdrop(layer["backdrop"])
         lo, hi = back.bounds()
         middle = (lo + hi) / 2.0
@@ -877,7 +924,7 @@ class RenderSession:
                 axis, float(wanted), cmap=layer.get("cmap"),
                 transparent_below=layer.get("transparent_below"),
                 fill=self._slice_fill(layer),
-                overlays=layer.get("overlays"),
+                overlays=_fills(layer.get("overlays")),
             )
             # Unlit on purpose: these are photographs of tissue, and shading
             # them would add a highlight that means nothing anatomically.
@@ -978,20 +1025,20 @@ class RenderSession:
         if layer.get("values_only"):
             lines = self._painted_fibers(layer, lines) or lines
 
-        # Tubes are a property of the LAYER, not of the render. Making it a
-        # render mode is what let preview and export disagree about which
-        # fibres were drawn; now there is one scene, and an export is the same
-        # scene with more pixels and better antialiasing.
-        if not layer.get("tubes"):
-            return lines, False
-
-        # Thickness is a style field, so it is deliberately not in _FIBER_KEYS --
-        # dragging it must not re-read the tractogram. It does change the swept
-        # geometry though, so the tube cache carries its own key -- and so does
-        # the selection, or the export would reuse tubes built for a different
-        # set of fibres.
+        # ALWAYS real swept geometry, never render_lines_as_tubes. That shader
+        # takes a width in PIXELS and the driver quantises it to an integer, so
+        # every thickness under about 1.4 px drew the identical flat one-pixel
+        # hairline: the bottom third of the slider changed nothing and caught no
+        # light at all (measured: pixel counts identical and luminance spread
+        # exactly 0.0 at 0%, 10% and 20%). Real tubes are smooth and lit across
+        # the whole range, so thickness behaves like a slider.
+        #
+        # Hi-res is now what it was always described as -- more pixels, better
+        # antialiasing, and a rounder tube -- rather than a switch between two
+        # different kinds of geometry that the preview and the export could
+        # disagree about.
         radius = _thickness_mm(layer)
-        sides = int(layer.get("tube_sides") or 8)
+        sides = int(layer.get("tube_sides") or 8) if layer.get("tubes") else 5
         shape = (round(radius, 4), sides, int(lines.n_points),
                  _key(layer, ("prune",)),
                  _key(layer, ("values_only",)),
@@ -1002,14 +1049,18 @@ class RenderSession:
             entry["tube_shape"] = shape
         return entry["tubes"], True
 
-    def _add_fibers(self, pl, layer):
+    def _add_fibers(self, pl, layer, material=None):
         from calvin_utils.plotting_utils.fiber_render import (
-            FIBER_MATERIAL, line_width_for_radius)
+            fiber_material, line_width_for_radius)
         from calvin_utils.plotting_utils.render_scene import resolve_scale
 
         poly, tubed = self._fiber_geometry(layer)
+        # The panel MODULATES the fibre material rather than replacing it, so
+        # the sliders reach fibres without flattening the gloss that makes a
+        # bundle read as a bundle. One material for the whole layer, whatever
+        # colours its points end up with.
         kw = dict(opacity=float(layer["opacity"]), lighting=True,
-                  show_scalar_bar=False, **FIBER_MATERIAL)
+                  show_scalar_bar=False, **fiber_material(material))
 
         painted = self._fiber_overlays(layer, poly)
         if painted is not None:
@@ -1030,7 +1081,7 @@ class RenderSession:
                       render_lines_as_tubes=True)
         if layer["coloring"] == "direction":
             return [pl.add_mesh(poly, scalars="dir", rgb=True, **kw)]
-        if layer["coloring"] == "value":
+        if layer["coloring"] == "value" and self._has_values(poly):
             cmap, clim = resolve_scale(np.asarray(poly["vals"]),
                                        cmap=layer["palette"], clim=layer["clim"],
                                        color=layer["color"])
@@ -1078,7 +1129,7 @@ class RenderSession:
         from calvin_utils.plotting_utils.mesh_paint import _select
         from calvin_utils.plotting_utils.overlay_paint import overlay_colours
 
-        overlays = [o for o in (layer.get("overlays") or []) if o.get("nifti")]
+        overlays = [o for o in _fills(layer.get("overlays")) if o.get("nifti")]
         if not overlays:
             return None
 
@@ -1160,7 +1211,7 @@ class RenderSession:
         )
         from matplotlib.colors import to_rgb
 
-        overlays = [o for o in (layer.get("overlays") or []) if o.get("nifti")]
+        overlays = [o for o in _fills(layer.get("overlays")) if o.get("nifti")]
         if not overlays:
             return None
 
@@ -1182,17 +1233,86 @@ class RenderSession:
                              absolute=overlay["absolute"],
                              threshold=overlay["threshold"],
                              max_value=overlay.get("max_value"))
-            self._record_scale(overlay, values)
-            stack.append(overlay_colours(values[owner], overlay))
+            rgb, alpha = overlay_colours(values[owner], overlay)
+            rgb, alpha = self._fiber_paint(layer, poly, overlay, rgb, alpha)
+            if layer.get("coloring", "solid") == "value":
+                self._record_scale(overlay, values)
+            stack.append((rgb, alpha))
         if not stack:
             return None
 
-        if layer["coloring"] == "direction":
-            base = np.asarray(poly["dir"], float) / 255.0
-        else:
-            base = np.tile(np.asarray(to_rgb(layer["color"]), float),
-                           (poly.n_points, 1))
-        return (composite(base, stack) * 255).astype(np.uint8)
+        return (composite(self._fiber_base(layer, poly), stack)
+                * 255).astype(np.uint8)
+
+    @staticmethod
+    def _fiber_paint(layer, poly, overlay, rgb, alpha):
+        """Apply the layer's "Colour by" to the fibres one overlay paints.
+
+        The values placed in a fibre layer are what the layer is FOR, so the
+        layer's colouring has to govern them, not only the unpainted atlas
+        under them. Before this, an overlay always painted its own value ramp
+        and "Colour by" only reached the backdrop -- which on an atlas has no
+        values at all -- so switching between value and solid changed nothing
+        that could be seen.
+
+        The overlay still decides WHICH fibres it paints (sign, threshold,
+        value window, Skip below min: all folded into ``alpha``); the colouring
+        only decides what colour they get.
+        """
+        from matplotlib.colors import to_rgb
+
+        coloring = layer.get("coloring", "solid")
+        if coloring == "value":
+            return rgb, alpha
+        # Flat alpha: the value-shaped fade-in of a LUT ramp belongs to a value
+        # colouring. In solid a painted fibre is simply painted.
+        painted = np.asarray(alpha) > 0.0
+        flat = np.where(painted, float(overlay.get("opacity", 1.0)), 0.0)
+        if coloring == "direction" and "dir" in poly.point_data:
+            return np.asarray(poly["dir"], float) / 255.0, flat
+        solid = to_rgb(overlay.get("color") or layer["color"])
+        return np.broadcast_to(np.asarray(solid, float), np.shape(rgb)).copy(), flat
+
+    @staticmethod
+    def _has_values(poly):
+        """Whether a layer's OWN streamlines carry values worth a colour scale.
+
+        A bare atlas loads with every value 0.0 -- its findings arrive as
+        overlays -- and a ramp over a constant draws one arbitrary colour.
+        """
+        if "vals" not in poly.point_data:
+            return False
+        vals = np.asarray(poly["vals"], float)
+        vals = vals[np.isfinite(vals)]
+        return vals.size > 0 and float(np.ptp(vals)) > 0.0
+
+    @staticmethod
+    def _fiber_base(layer, poly):
+        """The layer's OWN colouring, as float RGB per point.
+
+        This is the backdrop a finding is painted over, and it has to honour
+        all three colourings. "direction" was handled here and "solid" fell out
+        of the else, but "value" landed in that else too -- so adding a single
+        values overlay silently turned a value-coloured atlas into a flat slab
+        of the layer colour, and Colour by value looked broken the moment a
+        finding was dropped on it.
+        """
+        from calvin_utils.plotting_utils.render_scene import resolve_scale
+        from matplotlib.colors import to_rgb
+
+        coloring = layer.get("coloring", "solid")
+        if coloring == "direction" and "dir" in poly.point_data:
+            return np.asarray(poly["dir"], float) / 255.0
+        if coloring == "value" and RenderSession._has_values(poly):
+            values = np.asarray(poly["vals"], float)
+            cmap, clim = resolve_scale(values, cmap=layer["palette"],
+                                       clim=layer["clim"],
+                                       color=layer["color"])
+            span = (clim[1] - clim[0]) or 1.0
+            scaled = np.clip((values - clim[0]) / span, 0.0, 1.0)
+            return np.asarray(cmap(scaled))[..., :3]
+        return np.tile(np.asarray(to_rgb(layer["color"]), float),
+                       (poly.n_points, 1))
 
     # -- rendering ----------------------------------------------------------
     def render(self, *args, **kwargs):

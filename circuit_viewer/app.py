@@ -30,7 +30,7 @@ from .spec import (
 STATIC = Path(__file__).resolve().parent / "static"
 MESH_SUFFIXES = {".vtk", ".vtp", ".stl", ".ply", ".obj", ".gii"}
 VOLUME_SUFFIXES = {".nii", ".gz"}
-FIBER_SUFFIXES = {".mat", ".npy", ".tck", ".trk"}
+FIBER_SUFFIXES = {".mat", ".npy", ".tck", ".trk", ".json"}
 
 
 def _sha256(path, chunk=1 << 20):
@@ -150,7 +150,9 @@ def create_app(spec=None, drop_dir=None):
         # here, once, so the browser can route the drop without a second call.
         kind = "volume"
         lower = name.lower()
-        if lower.endswith((".mat", ".json")):
+        if lower.endswith(".fib.npy"):
+            kind = "fiber_values"
+        elif lower.endswith((".mat", ".json")):
             from calvin_utils.plotting_utils.electrode_render import (
                 looks_like_electrode,
             )
@@ -163,13 +165,13 @@ def create_app(spec=None, drop_dir=None):
                 kind = "fiber_desc"
             else:
                 kind = "electrode" if looks_like_electrode(target) else "tract"
-        elif lower.endswith((".fib.npy", ".tck", ".trk", ".npz", ".npy")):
+        elif lower.endswith((".tck", ".trk", ".npz", ".npy")):
             kind = "tract"
         return jsonify({"path": str(target), "name": name, "kind": kind})
 
     @app.get("/api/descriptor")
     def api_descriptor():
-        """Resolve a .fib.desc.json to the atlas and values file it names.
+        """Resolve a .fib.json to the atlas and values file it names.
 
         Done server-side because it is the descriptor's own promises that are
         being checked -- the values' SHA-256 and the atlas' size -- and those

@@ -370,7 +370,16 @@ function overlayStack(b, L, set, kind){
      * voxels are shown, so moving the colour ends restyles a figure and never
      * rethresholds it. */
     body.appendChild(el('div','sec','Processing — acts on the volume'));
-    if (kind === 'mesh'){
+    /* Fill paints the surface; outline paints nothing and traces the edge of
+     * whatever survives sign and threshold, in this card's colour. A full t map
+     * as a fill with its significant part as an outline is the intended use. */
+    const outline = kind === 'mesh' && o.draw === 'outline';
+    if (kind === 'mesh')
+      field(body, 'Draw as', select(
+        [{value:'fill', label:'fill — colour the surface'},
+         {value:'outline', label:'outline — trace the selected region'}],
+        o.draw || 'fill', v => { o.draw = v; set('overlays', stack); drawLayers(); }));
+    if (kind === 'mesh' && !outline){
       field(body, 'Sample', select(
         [{value:'region',label:'region — one value per mesh'},
          {value:'vertex',label:'vertex — gradient'}],
@@ -393,6 +402,28 @@ function overlayStack(b, L, set, kind){
      * Each pass spreads values into unpainted neighbours ALONG the mesh, so a
      * patch fills from its own data and nothing is invented where a whole
      * connected region is empty. */
+    if (outline){
+      const w = el('input'); w.type = 'number'; w.min = 0.5; w.step = 0.5;
+      w.value = o.outline_width ?? 3;
+      w.onchange = () => { o.outline_width = parseFloat(w.value) || 3; set('overlays', stack); };
+      field(body, 'Line width (px)', w);
+      const sm = el('input'); sm.type = 'number'; sm.min = 0; sm.step = 0.25;
+      sm.value = o.outline_smooth ?? 1;
+      sm.title = 'Gaussian blur of the region, in voxels, before tracing; 0 follows voxel edges';
+      sm.onchange = () => { o.outline_smooth = Math.max(parseFloat(sm.value) || 0, 0); set('overlays', stack); };
+      field(body, 'Edge smoothing (vox)', sm);
+      const opo = el('input'); opo.type='range'; opo.min=0; opo.max=1; opo.step=0.02;
+      opo.value = o.opacity;
+      opo.oninput = () => { o.opacity = parseFloat(opo.value); set('overlays', stack); };
+      field(body, 'Opacity', opo);
+      body.appendChild(el('div','hint',
+        'Traced where this volume survives sign and threshold. Set the ' +
+        'threshold (or give an FWE map) to choose what counts as significant; ' +
+        'the line takes the swatch colour.'));
+      card.appendChild(body);
+      b.appendChild(card);
+      return;
+    }
     if (kind === 'mesh' && o.mode === 'vertex'){
       /* Stored as a number of passes, so an old spec keeps whatever it was
        * saved with, but offered as on/off -- the question is whether to close
@@ -810,7 +841,7 @@ function fiberBody(b, L, set){
   field(b, 'Opacity', op);
 
   /* One value per atlas fibre, layered. The atlas is the geometry and each
-   * .fib.values.npy is a finding painted onto it, so a bundle can carry a
+   * .fib.npy is a finding painted onto it, so a bundle can carry a
    * background colouring that later findings overwrite only where they have
    * something to say. */
   overlayStack(b, L, set, 'fibers');
@@ -975,13 +1006,17 @@ async function volumeHint(parent, path){
  * is the only thing that says which -- so every target highlights on hover.
  */
 const VOLUME_RE = /\.nii(\.gz)?$/i;
-const TRACT_RE  = /\.(mat|tck|trk|json|npz)$|\.fib\.npy$/i;
-/* Values, not geometry: one number per atlas fibre. Checked before the
- * tract pattern, because .fib.values.npy matches neither cleanly. */
-const VALUES_RE = /\.fib\.values\.npy$|\.values\.npy$/i;
+const TRACT_RE  = /\.(mat|tck|trk|json|npz|npy)$/i;
+/* Values, not geometry: one number per atlas fibre. Exclude these from the
+ * broader tract pattern, which also accepts ordinary .npy geometry atlases. */
+const VALUES_RE = /\.fib\.npy$/i;
 /* The descriptor stands in for the values it describes, so dropping one on a
  * layer that already has fibres adds a finding rather than replacing them. */
-const DESC_RE   = /\.fib\.desc\.json$/i;
+const DESC_RE   = /\.fib\.json$/i;
+
+function isTractFile(name){
+  return TRACT_RE.test(name) && !VALUES_RE.test(name);
+}
 
 async function upload(files){
   const out = [];
@@ -998,9 +1033,9 @@ async function upload(files){
 
 async function dropAsNewGroup(files){
   const volumes = files.filter(f => VOLUME_RE.test(f.name));
-  const tracts  = files.filter(f => TRACT_RE.test(f.name));
+  const tracts  = files.filter(f => isTractFile(f.name));
   if (!volumes.length && !tracts.length)
-    throw new Error('drop a .nii/.nii.gz volume, a .mat/.tck tractogram, or a lead .mat/.json');
+    throw new Error('drop a .nii/.nii.gz volume, a tractogram, a .fib.json result, or a lead .mat/.json');
 
   if (volumes.length){
     const up = await upload(volumes);
@@ -1022,12 +1057,12 @@ async function dropAsNewGroup(files){
       if (u.kind === 'fiber_desc'){
         /* A descriptor is a whole layer in one file: it names the atlas the
          * values were written against, so dropping one gives the fibres AND
-         * the first finding on them. More .fib.values.npy can then be dropped
+         * the first finding on them. More .fib.npy files can then be dropped
          * onto the layer. */
         const d = await getJSON('/api/descriptor?path=' + encodeURIComponent(u.path));
         const layer = await getJSON('/api/layer/fibers');
         const o = await newOverlay(u.path);
-        o.mode = 'vertex'; o.name = d.name;
+        o.mode = 'vertex'; o.name = d.name; o.hide_below_min = true;
         Object.assign(layer, {name: d.name, source: d.atlas, overlays: [o]});
         SPEC.layers.push(layer); OPEN = layer.id;
         status(`${d.name}: ${d.fiber_count} fibers from ${d.atlas.split('/').pop()} …`);
@@ -1045,7 +1080,7 @@ async function dropAsNewGroup(files){
 
 async function dropOntoLayer(layer, files){
   const volumes = files.filter(f => VOLUME_RE.test(f.name));
-  const tracts  = files.filter(f => TRACT_RE.test(f.name));
+  const tracts  = files.filter(f => isTractFile(f.name));
 
   if (layer.kind === 'fibers'){
     const vals = files.filter(f => VALUES_RE.test(f.name) || DESC_RE.test(f.name));
@@ -1055,15 +1090,24 @@ async function dropOntoLayer(layer, files){
       const stack = layer.overlays || (layer.overlays = []);
       for (const up of await upload(vals)){
         const o = await newOverlay(up.path);
+        o.name = up.name;
         o.color = OVERLAY_COLOURS[stack.length % OVERLAY_COLOURS.length];
         o.mode = 'vertex';
+        /* On a MESH the foot of a sequential ramp is a pale neutral, and that
+         * reads correctly as unpainted anatomy. A fibre has no anatomy under
+         * it, so the same pale foot just looks like the colour stopped
+         * applying -- set the scale to [0, 2] on data that runs to -4 and
+         * two thirds of the bundle washes out to grey. A fibre below the
+         * scale minimum should fall back to the atlas colour instead. Still
+         * a checkbox on the card; this only changes what it starts as. */
+        o.hide_below_min = true;
         stack.push(o);
       }
       status(`adding ${vals.length} finding(s) to ${layer.name} …`);
     } else if (tracts.length){
       layer.source = (await upload(tracts))[0].path;
     } else {
-      throw new Error('a fiber layer takes an atlas, a tractogram, or .fib.values.npy');
+      throw new Error('a fiber layer takes an atlas, a tractogram, .fib.npy values, or a .fib.json result');
     }
   } else {
     if (!volumes.length) throw new Error('drop a NIfTI here to colour this group');

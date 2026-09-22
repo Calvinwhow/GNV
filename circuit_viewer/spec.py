@@ -42,7 +42,7 @@ __all__ = [
     "new_fiber_layer", "new_slice_layer", "new_electrode_layer",
     "new_overlay", "OVERLAY",
     "normalize_spec", "load_spec", "save_spec", "camera_direction", "VIEW_PRESETS",
-    "STATS", "SIGNS", "MODES", "SPLITS", "FIBER_COLORINGS",
+    "STATS", "SIGNS", "MODES", "DRAWS", "SPLITS", "FIBER_COLORINGS",
 ]
 
 SPEC_VERSION = 1
@@ -50,6 +50,7 @@ SPEC_VERSION = 1
 STATS = ("max", "mean_nonzero", "mean", "min", "sum")
 SIGNS = ("both", "positive", "negative")
 MODES = ("region", "vertex")
+DRAWS = ("fill", "outline")
 SPLITS = ("auto", "single", "labels", "components")
 FIBER_COLORINGS = ("solid", "direction", "value")
 
@@ -195,6 +196,13 @@ OVERLAY = {
     "min_value": None,
     "keep_top": None,
     "step": 1.0,
+    # "fill" paints the surface. "outline" paints nothing: it draws the edge of
+    # whatever survives sign / threshold / max as lines in `color`, so a full
+    # t map can colour the surface while its significant part is only traced.
+    # Mesh layers only.
+    "draw": "fill",
+    "outline_width": 3.0,     # line width, pixels
+    "outline_smooth": 1.0,    # Gaussian sigma in voxels on the mask before tracing
 }
 
 
@@ -410,6 +418,9 @@ def _overlays(raw, layer):
         _check(item["mode"] in MODES, f"overlay mode must be one of {MODES}")
         _check(item["stat"] in STATS, f"overlay stat must be one of {STATS}")
         _check(item["sign"] in SIGNS, f"overlay sign must be one of {SIGNS}")
+        _check(item["draw"] in DRAWS, f"overlay draw must be one of {DRAWS}")
+        item["outline_width"] = max(float(item["outline_width"] or 3.0), 0.5)
+        item["outline_smooth"] = max(float(item["outline_smooth"] or 0.0), 0.0)
         item["opacity"] = min(max(float(item["opacity"]), 0.0), 1.0)
         for key in ("threshold", "max_value", "min_value", "clim"):
             if item.get(key) in ("", []):

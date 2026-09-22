@@ -86,8 +86,11 @@ Where a file lands decides what it means, and that is the whole interface:
   meshes that layer already has, exactly as if you had set its NIfTI field.
 
 The same file does two different jobs, so every drop target highlights while you
-are over it.  A `.mat` / `.tck` tractogram dropped on the New group box becomes
-a fiber layer; dropped on an existing fiber layer it replaces its source.
+are over it. A `.mat` / `.tck` tractogram dropped on the New group box becomes
+a fiber layer; dropped on an existing fiber layer it replaces its source. A
+`.fib.npy` is one value per atlas fiber and can be dropped onto an existing
+fiber layer as an overlay. A `.fib.json` result can be dropped as a new fiber
+layer because it identifies both the atlas geometry and its `.fib.npy` values.
 
 Dropped files are copied into a scratch folder, since a browser will not tell a
 page where a dropped file lives.  For anything large, or anything a saved
@@ -133,10 +136,12 @@ that is 161 ms down to 71 ms a frame, and the slice read inside it is under a
 millisecond.  The volumes an overlay samples are cached after first use, so the
 first drag after adding one pays a read the rest do not.
 
-**Fiber layers** hold streamlines from a Lead-DBS `.mat` or `.fib.npy`.  They are
-their own kind because they do not hang off a mesh -- the geometry is in the
-tractogram.  Note *Max |value|*: a `contrast_pval_*` file stores p-values, where
-the fibres you want are the small ones, so `0.05` is the significant set.
+**Fiber layers** hold streamlines from a Lead-DBS `.mat` or a tractogram atlas.
+They are their own kind because they do not hang off a mesh -- the geometry is
+in the tractogram. A `.fib.npy` supplies one value per atlas fiber, while its
+`.fib.json` descriptor identifies the atlas and values together. Note
+*Max |value|*: a `contrast_pval_*` file stores p-values, where the fibres you
+want are the small ones, so `0.05` is the significant set.
 
 Anything a layer does not colour stays in the opaque base grey, so "no signal
 here" still reads as anatomy instead of turning into the bottom of a colour bar.
