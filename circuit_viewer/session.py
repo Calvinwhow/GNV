@@ -294,7 +294,9 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
                                   presmooth_vox=presmooth_vox)
             stem = Path(str(entry)).name.split(".nii")[0]
             for key, mesh in part.items():
-                label = key if len(name) == 1 or key.startswith(stem) else f"{stem}"
+                # One region from a file is named by the file; a file that
+                # split into several (labels, 4D frames) keeps its own names.
+                label = key if len(name) == 1 or len(part) > 1 else stem
                 while label in seen:
                     label = f"{label}_"
                 seen.add(label)
@@ -334,6 +336,16 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
 
     path = Path(text).expanduser()
     if path.is_dir():
+        # A folder of meshes is a parcel set; a folder of volumes is the same
+        # thing before surfacing, one region per file (4D files expand to one
+        # per frame). Meshes win if the folder has both.
+        if any(path.glob("*.vtk")):
+            return load_parcels(path)
+        volumes = sorted(p for p in path.iterdir()
+                         if not p.name.startswith(".") and is_volume(p.name))
+        if volumes:
+            return resolve_meshes([str(p) for p in volumes], iso=iso, split=split,
+                                  presmooth_vox=presmooth_vox)
         return load_parcels(path)
     if path.is_file():
         return {path.stem: pv.read(path)}
@@ -455,9 +467,17 @@ class RenderSession:
             for name, mesh in zip(names, meshes):
                 spans[name] = (at, at + mesh.n_cells)
                 at += mesh.n_cells
+            # Atlas colours ride on the loaded meshes; read them off the uncut,
+            # undecimated group, since decimation does not keep field data.
+            rgb = {}
+            for name in names:
+                source = full.get(name)
+                held = source.field_data.get("atlas_rgb") if source is not None else None
+                if held is not None and len(held) >= 3:
+                    rgb[name] = [float(v) for v in np.asarray(held).ravel()[:3]]
             result = {"parts": {"_": merged}, "region_set": True,
                       "group": group, "full_group": full, "spans": spans,
-                      "order": names}
+                      "order": names, "region_rgb": rgb}
         else:
             parts = group if hemis else {"_": _merge(list(group.values()))}
             result = {"parts": parts, "region_set": False, "group": group,
@@ -465,6 +485,24 @@ class RenderSession:
 
         self._geometry[cache_key] = result
         return result
+
+    def _region_base(self, layer, geom):
+        """Per-cell base colours for a region set, or None for one flat colour."""
+        mode = layer.get("region_colors")
+        if not mode or not geom.get("region_set") or not geom.get("spans"):
+            return None
+        from matplotlib import colormaps
+
+        palette = (list(colormaps["tab20"].colors) + list(colormaps["tab20b"].colors)
+                   + list(colormaps["tab20c"].colors))
+        atlas = geom.get("region_rgb") or {}
+        mesh = geom["parts"]["_"]
+        base = np.empty((mesh.n_cells, 3), float)
+        for i, name in enumerate(geom["order"]):
+            begin, end = geom["spans"][name]
+            colour = atlas.get(name) if mode == "atlas" else None
+            base[begin:end] = colour if colour is not None else palette[i % len(palette)][:3]
+        return base
 
     def _mesh_colours(self, layer, geom):
         """Resolve the overlay stack to explicit RGB.
@@ -488,12 +526,17 @@ class RenderSession:
         from matplotlib.colors import to_rgb
 
         overlays = _fills(layer.get("overlays"))
+        region_base = self._region_base(layer, geom)
         if not overlays:
-            return None
+            if region_base is None:
+                return None
+            return {"mode": "rgb", "values": (region_base * 255).astype(np.uint8),
+                    "target": self._target(geom)}
         stacks = [self._overlay_values(layer, geom, o) for o in overlays]
 
-        base = np.tile(np.asarray(to_rgb(layer["color"]), float),
-                       (len(stacks[0]), 1))
+        base = (region_base if region_base is not None and len(region_base) == len(stacks[0])
+                else np.tile(np.asarray(to_rgb(layer["color"]), float),
+                             (len(stacks[0]), 1)))
         painted = composite(base, [overlay_colours(v, o)
                                    for v, o in zip(stacks, overlays)])
         for values, overlay in zip(stacks, overlays):
@@ -773,6 +816,8 @@ class RenderSession:
             if not layer.get("source"):
                 return []
             return self._add_electrode(pl, layer, material)
+        if not layer.get("mesh"):
+            return []           # a fresh mesh layer, still on its picker
         return self._add_mesh(pl, layer, material)
 
     def _add_mesh(self, pl, layer, material):

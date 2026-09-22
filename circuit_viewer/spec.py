@@ -51,7 +51,8 @@ STATS = ("max", "mean_nonzero", "mean", "min", "sum")
 SIGNS = ("both", "positive", "negative")
 MODES = ("region", "vertex")
 DRAWS = ("fill", "outline")
-SPLITS = ("auto", "single", "labels", "components")
+REGION_COLORS = (None, "distinct", "atlas")
+SPLITS = ("auto", "single", "labels", "components", "volumes")
 FIBER_COLORINGS = ("solid", "direction", "value")
 
 # Azimuth is measured in the axial plane from anterior, turning towards the LEFT
@@ -86,7 +87,7 @@ MESH_LAYER = {
     "visible": True,
     "mesh": "pial_wholebrain",   # a registered name, a directory, or a NIfTI
     "iso": 0.0,                  # NIfTI source: "inside" is value > iso
-    "split": "auto",             # auto | single | labels | components
+    "split": "auto",             # auto | single | labels | components | volumes (4D)
     "presmooth_vox": 1.2,        # NIfTI source: surface smoothing, in voxels
     "color": "#b7bcc4",
     "opacity": 1.0,
@@ -111,6 +112,11 @@ MESH_LAYER = {
     # translucent shell, surprising everywhere else, so it is off unless asked.
     "cull_near_hemisphere": False,
     "overlays": [],           # volumes colouring this group, in order
+    # Region sets only. None paints every region `color`; "distinct" gives each
+    # region its own colour from a qualitative palette; "atlas" uses the colours
+    # the atlas's label table carries (falls back to distinct where it has none).
+    # Fill overlays paint over whichever base this gives.
+    "region_colors": None,
 }
 
 FIBER_LAYER = {
@@ -353,12 +359,16 @@ def normalize_spec(spec):
             layer["hidden_regions"] = [str(r) for r in
                                        (layer.get("hidden_regions") or [])]
             layer["section"] = _section(layer.get("section"))
+            _check(layer.get("region_colors") in REGION_COLORS,
+                   f"region_colors must be one of {REGION_COLORS}")
             mesh = layer["mesh"]
             if isinstance(mesh, (list, tuple)):
                 layer["mesh"] = [str(m) for m in mesh if str(m).strip()]
                 _check(layer["mesh"], "a mesh layer needs at least one volume")
             else:
-                _check(mesh, "a mesh layer needs a mesh")
+                # "" is a layer that has not been given geometry yet: it draws
+                # nothing and its panel opens on the library picker.
+                layer["mesh"] = str(mesh or "")
 
             layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
         elif kind == "fibers":

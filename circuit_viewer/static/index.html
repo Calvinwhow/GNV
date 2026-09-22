@@ -159,6 +159,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   display:flex;gap:8px;align-items:center}
 #list div:hover{background:var(--panel-2)}
 #list .d{color:var(--accent)}
+#list .sel{background:var(--panel-2);outline:1px solid var(--accent)}
+#m-folder{display:none}
+#modal.pick-many #m-folder{display:inline-block}
 #modal footer{padding:10px 14px;border-top:1px solid var(--line);display:flex;gap:8px}
 #modal footer input{flex:1;font-family:var(--mono);font-size:11px}
 </style>
@@ -207,7 +210,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   <h2 id="m-title">Choose a file</h2>
   <div class="cwd"><button id="m-up">↑</button><input id="m-path" type="text"></div>
   <div id="list"></div>
-  <footer><input id="m-name" type="text" placeholder="file name"><button id="m-cancel">Cancel</button><button id="m-ok" class="primary">Choose</button></footer>
+  <footer><input id="m-name" type="text" placeholder="file name"><button id="m-folder" title="use every volume in the folder shown above">Use this folder</button><button id="m-cancel">Cancel</button><button id="m-ok" class="primary">Choose</button></footer>
 </div></div>
 
 <script src="/static/app.js"></script>

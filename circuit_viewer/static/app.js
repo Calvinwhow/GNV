@@ -122,6 +122,41 @@ function pathField(parent, label, value, kind, onchange){
 const isVolume = p => /\.(nii(\.gz)?|npz)$/i.test(String(p || ''));
 
 
+/* The one entry point for anything a layer is BUILT from -- a mesh, a slice
+ * backdrop, a volume. A new layer opens with only this: pick something prepared
+ * from the library, or import a file, and the layer's controls appear once it
+ * has something to show. Grouped options are {group, value, label}. */
+function libraryPicker(b, {label, options, value, empty, onpick, actions = [], hint}){
+  const s = el('select');
+  const none = el('option', null, value ? '— other —' : (options.length ? '— choose —' : empty));
+  none.value = ''; s.appendChild(none);
+  const groups = new Map();
+  options.forEach(o => {
+    const key = o.group || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(o);
+  });
+  groups.forEach((items, name) => {
+    const parent = name ? el('optgroup') : s;
+    if (name) { parent.label = name; s.appendChild(parent); }
+    items.forEach(o => { const opt = el('option', null, o.label); opt.value = o.value;
+                         if (o.disabled) opt.disabled = true; parent.appendChild(opt); });
+  });
+  s.value = options.some(o => o.value === value) ? value : '';
+  s.onchange = () => { if (s.value) onpick(s.value); };
+  field(b, label, s);
+  if (actions.length){
+    const row = el('div','row'); row.appendChild(el('label', null, ''));
+    const box = el('div','grow inline');
+    actions.forEach(a => { const btn = el('button', null, a.label); btn.onclick = a.onclick;
+                           box.appendChild(btn); });
+    row.appendChild(box); b.appendChild(row);
+  }
+  if (hint) b.appendChild(el('div','hint', hint));
+  return s;
+}
+const backdropLabel = d => `${d.name} · ${d.mm} mm · ${(d.bytes/1e6).toFixed(0)} MB`;
+
 let PALETTES = null;
 
 async function refreshPalettes(){
@@ -506,62 +541,79 @@ function overlayStack(b, L, set, kind){
         'One volume gets a colour bar; several are composited, later over earlier.'));
 }
 
+const MESH_FILE_RE = /\.(vtk|vtp|ply|obj|stl|gii)$/i;
 function meshBody(b, L, set){
-  const groups = {};
-  CAT.meshes.forEach(m => (groups[m.group] ||= []).push({
-    value: m.name, disabled: m.available === false,
-    label: (m.available === false ? '— ' : '') + m.name + ' — ' +
-           (m.available === false ? 'not available to this renderer'
-                                  : m.what.replace(/^\[[^\]]*\]\s*/, '')),
-  }));
-  const opts = [...(groups.surface || []), ...(groups.parcels || [])];
-  const vol = isVolume(L.mesh);
+  /* Anything that is not a registered mesh or a mesh file is surfaced from
+   * volumes -- one NIfTI, a list of them, or a folder -- so it gets the volume
+   * controls (threshold, split). */
+  const builtIn = CAT.meshes.some(m => m.name === L.mesh);
+  const vol = !!L.mesh && !builtIn && !(typeof L.mesh === 'string' && MESH_FILE_RE.test(L.mesh));
+  const lib = (BACKDROPS && BACKDROPS.backdrops) || [];
+  const GROUP = {surface: 'Surfaces', parcels: 'Parcel sets'};
+  const options = [
+    ...CAT.meshes.map(m => ({
+      group: GROUP[m.group] || 'Meshes', value: m.name, disabled: m.available === false,
+      label: (m.available === false ? '— ' : '') + m.name + ' — ' +
+             (m.available === false ? 'not available to this renderer'
+                                    : m.what.replace(/^\[[^\]]*\]\s*/, ''))})),
+    ...lib.map(d => ({group: 'Prepared volumes — surfaced here', value: d.path,
+                      label: backdropLabel(d)})),
+  ];
+  libraryPicker(b, {
+    label: 'Mesh', options, value: Array.isArray(L.mesh) ? '' : L.mesh,
+    empty: '— no meshes found —',
+    onpick: v => {
+      L.mesh = v;
+      if (!L.name || L.name === 'Mesh')
+        L.name = String(v).split('/').pop().replace(/\.(nii(\.gz)?|npz|vtk|vtp)$/i, '');
+      /* A prepared volume colours itself: point a vertex overlay at the same
+       * file, so picking one shows its anatomy rather than a flat grey surface. */
+      const stack = L.overlays || (L.overlays = []);
+      if (isVolume(v) && stack.length && stack[0].mode === 'vertex') stack[0].nifti = v;
+      set('mesh', v); drawLayers(); },
+    actions: [{label: 'Import files or a folder …', onclick: () =>
+      chooseFile('import', $('#m-path').value, p => {
+        if (!L.name || L.name === 'Mesh')
+          L.name = Array.isArray(p) ? `${p.length} volumes` : String(p).split('/').filter(Boolean).pop();
+        /* An import is usually an atlas: colour its regions apart from the start. */
+        if (!MESH_FILE_RE.test(String(p))) L.region_colors = 'atlas';
+        set('mesh', Array.isArray(p) && p.length === 1 ? p[0] : p); drawLayers(); })}],
+    hint: L.mesh ? null :
+      'Pick a prepared surface, parcel set or volume, or import: one NIfTI, several ' +
+      '(⌘/ctrl-click in the chooser), a folder of NIfTIs or parcel meshes, or a 4D ' +
+      'atlas with one parcel per volume. You can also drop files onto the view.',
+  });
+  if (!L.mesh) return;
 
-  /* Geometry comes either from a mesh that already exists or from a volume we
-   * surface here. One field holds both, because downstream nothing else cares. */
-  field(b, 'Geometry', select(
-    [{value:'mesh', label:'built-in mesh'}, {value:'volume', label:'a NIfTI volume'}],
-    vol ? 'volume' : 'mesh',
-    v => set('mesh', v === 'volume' ? '' : 'pial_wholebrain')));
-
-  if (!vol){
-    field(b, 'Mesh', select(opts, L.mesh, v => set('mesh', v)));
-  } else {
-    /* Prepared backdrops first: they are already resampled and quantised, so
-     * they mesh in seconds and can colour themselves. Any other NIfTI still
-     * works through the path field below. */
-    const lib = (BACKDROPS && BACKDROPS.backdrops) || [];
-    if (lib.length){
-      const chosen = lib.find(d => d.path === L.mesh);
-      field(b, 'Prepared volume', select(
-        [{value:'', label: chosen ? '— other —' : '— choose —'},
-         ...lib.map(d => ({value: d.path,
-           label: `${d.name} · ${d.mm} mm · ${(d.bytes/1e6).toFixed(0)} MB`}))],
-        chosen ? chosen.path : '',
-        v => { if (!v) return;
-               L.mesh = v;
-               /* Point the self-colouring overlay at the same file, so picking a
-                * volume shows its anatomy rather than a flat grey surface. */
-               const stack = L.overlays || (L.overlays = []);
-               if (stack.length && stack[0].mode === 'vertex') stack[0].nifti = v;
-               set('mesh', v); drawLayers(); }));
-    }
-    pathField(b, 'Volume', L.mesh, 'volume', v => set('mesh', v || ''));
+  if (vol){
+    if (Array.isArray(L.mesh))
+      b.appendChild(el('div','hint', `${L.mesh.length} volumes: ` +
+        L.mesh.map(p => p.split('/').pop()).join(', ')));
+    else
+      pathField(b, 'Volume', L.mesh, 'volume', v => set('mesh', v || ''));
     field(b, 'Threshold', number(L.iso, v => set('iso', v === null ? 0 : v)));
     field(b, 'Split', select(
       [{value:'auto',label:'auto'},
        {value:'single',label:'single — one surface'},
        {value:'labels',label:'labels — one per integer value'},
-       {value:'components',label:'components — one per blob'}],
+       {value:'components',label:'components — one per blob'},
+       {value:'volumes',label:'volumes — one per 4th-dimension frame'}],
       L.split, v => set('split', v)));
     const sm = el('input'); sm.type='range'; sm.min=0; sm.max=3; sm.step=0.1;
     sm.value = L.presmooth_vox; sm.title = 'surface smoothing, in voxels';
     sm.onchange = () => set('presmooth_vox', parseFloat(sm.value));
     field(b, 'Surface smooth', sm);
-    if (L.mesh) volumeHint(b, L.mesh);
+    if (L.mesh && isVolume(L.mesh)) volumeHint(b, L.mesh);
     else b.appendChild(el('div','hint','Pick a NIfTI, or drop one onto the view.'));
   }
   field(b, 'Colour', colour(L.color, v => set('color', v)));
+  /* Region sets only: a flat colour, one colour per region, or the atlas's
+   * own colours from its label table (distinct wherever it has none). */
+  field(b, 'Region colours', select(
+    [{value:'', label:'one colour (above)'},
+     {value:'distinct', label:'distinct — one per region'},
+     {value:'atlas', label:'atlas — from its label table'}],
+    L.region_colors || '', v => set('region_colors', v || null)));
 
   const op = el('input'); op.type = 'range'; op.min = 0; op.max = 1; op.step = 0.01;
   op.value = L.opacity; op.oninput = () => set('opacity', parseFloat(op.value));
@@ -627,24 +679,17 @@ async function refreshBackdrops(){
 function sliceBody(b, L, set){
   const lib = (BACKDROPS && BACKDROPS.backdrops) || [];
   const chosen = lib.find(d => d.path === L.backdrop || d.name === L.backdrop);
-  field(b, 'Backdrop', select(
-    [{value:'', label: lib.length ? '— choose —' : '— none converted yet —'},
-     ...lib.map(d => ({value: d.path,
-       label: `${d.name} · ${d.mm} mm · ${(d.bytes/1e6).toFixed(0)} MB`}))],
-    chosen ? chosen.path : '', v => set('backdrop', v || null)));
-
-  const convert = el('button', null, 'Convert a NIfTI …');
-  convert.onclick = () => chooseFile('volume', $('#m-path').value, p => startConvert(p));
-  const cvRow = el('div','row'); cvRow.appendChild(el('label', null, ''));
-  const cvBox = el('div','grow'); cvBox.appendChild(convert); cvRow.appendChild(cvBox);
-  b.appendChild(cvRow);
-
-  if (!chosen){
-    b.appendChild(el('div','hint',
-      'Converted volumes accumulate in ' + ((BACKDROPS && BACKDROPS.dir) || '?') +
-      ' and are available to every figure afterwards.'));
-    return;
-  }
+  libraryPicker(b, {
+    label: 'Backdrop', value: chosen ? chosen.path : '',
+    options: lib.map(d => ({value: d.path, label: backdropLabel(d)})),
+    empty: '— none converted yet —',
+    onpick: v => set('backdrop', v),
+    actions: [{label: 'Convert a NIfTI …', onclick: () =>
+      chooseFile('volume', $('#m-path').value, p => startConvert(p))}],
+    hint: chosen ? null : 'Converted volumes accumulate in ' +
+      ((BACKDROPS && BACKDROPS.dir) || '?') + ' and are available to every figure afterwards.',
+  });
+  if (!chosen) return;
 
   /* Sliders run in WORLD millimetres over this backdrop's own bounds, so the
    * numbers mean the same thing as every coordinate elsewhere in the app. */
@@ -994,6 +1039,7 @@ async function volumeHint(parent, path){
     const v = await getJSON('/api/volume?' + new URLSearchParams({path}));
     note.textContent = `${v.shape.join('×')} · range ${v.min.toFixed(2)}…` +
       `${v.max.toFixed(2)} · ${v.distinct.toLocaleString()} distinct value(s)` +
+      (v.frames > 1 ? ` · ${v.frames} volumes along the 4th dimension` : '') +
       ` · auto → ${v.suggested_split}`;
   } catch (e) { note.textContent = e.message; }
 }
@@ -1043,7 +1089,7 @@ async function dropAsNewGroup(files){
     Object.assign(layer, {
       name: up.length === 1 ? up[0].name.split('.nii')[0] : `${up.length} volumes`,
       mesh: up.length === 1 ? up[0].path : up.map(u => u.path),
-      color: '#c15656', tessellate: 0, split: 'auto',
+      color: '#c15656', tessellate: 0, split: 'auto', region_colors: 'atlas',
     });
     SPEC.layers.push(layer); OPEN = layer.id;
     status(`surfacing ${up.length} volume(s) — this takes a moment …`);
@@ -1152,23 +1198,43 @@ $('#newgroup').addEventListener('click', () => $('#b-mesh').click());
 
 /* ---------- file chooser ---------- */
 let chooserResolve = null;
+/* 'import' is the mesh entry point: one file, several (ctrl / cmd / shift-click),
+ * or the folder being shown. Every other kind picks exactly one file. */
+let CHOOSE_MANY = false;
+let PICKED = [];
 async function browse(path, kind){
   const j = await getJSON('/api/browse?' + new URLSearchParams({path: path || '', kind}));
   $('#m-path').value = j.path;
   const list = $('#list'); list.innerHTML = '';
   j.entries.forEach(e => {
     const row = el('div', e.dir ? 'd' : '', (e.dir ? '📁 ' : '📄 ') + e.name);
-    row.onclick = () => { if (e.dir) browse(e.path, kind);
-                          else { $('#m-name').value = e.path; } };
-    row.ondblclick = () => { if (!e.dir) finishChoose(e.path); };
+    if (PICKED.includes(e.path)) row.classList.add('sel');
+    row.onclick = ev => {
+      if (e.dir) { browse(e.path, kind); return; }
+      if (CHOOSE_MANY && (ev.metaKey || ev.ctrlKey || ev.shiftKey)){
+        const at = PICKED.indexOf(e.path);
+        if (at >= 0) PICKED.splice(at, 1); else PICKED.push(e.path);
+        row.classList.toggle('sel', at < 0);
+      } else {
+        PICKED = [e.path];
+        list.querySelectorAll('.sel').forEach(n => n.classList.remove('sel'));
+        row.classList.add('sel');
+      }
+      $('#m-name').value = PICKED.length > 1 ? `${PICKED.length} files selected` : (PICKED[0] || '');
+    };
+    row.ondblclick = () => { if (!e.dir) finishChoose(PICKED.length > 1 ? PICKED.slice() : e.path); };
     list.appendChild(row);
   });
   $('#m-up').onclick = () => browse(j.parent, kind);
 }
 function chooseFile(kind, start, cb){
   chooserResolve = cb;
+  CHOOSE_MANY = kind === 'import'; PICKED = [];
+  $('#modal').classList.toggle('pick-many', CHOOSE_MANY);
   $('#m-title').textContent = {volume:'Choose a NIfTI', fibers:'Choose a fiber file',
-                               save:'Save as', mesh:'Choose a mesh'}[kind] || 'Choose a file';
+                               save:'Save as', mesh:'Choose a mesh',
+                               import:'Choose a file, several files (⌘/ctrl-click), or a folder'}[kind]
+                              || 'Choose a file';
   $('#m-name').value = '';
   $('#modal').classList.add('on');
   browse(start, kind).catch(e => status(e.message, true));
@@ -1179,8 +1245,11 @@ function finishChoose(path){
   if (cb) cb(path);
 }
 $('#m-cancel').onclick = () => { $('#modal').classList.remove('on'); chooserResolve = null; };
-$('#m-ok').onclick = () => { const v = $('#m-name').value.trim();
+$('#m-ok').onclick = () => {
+  if (CHOOSE_MANY && PICKED.length > 1) { finishChoose(PICKED.slice()); return; }
+  const v = $('#m-name').value.trim();
   if (v) finishChoose(v.includes('/') ? v : ($('#m-path').value + '/' + v)); };
+$('#m-folder').onclick = () => { const d = $('#m-path').value.trim(); if (d) finishChoose(d); };
 $('#m-path').onchange = () => browse($('#m-path').value, 'any').catch(e => status(e.message, true));
 
 /* ---------- orbit ---------- */
@@ -1223,7 +1292,10 @@ $('#b-hires').onclick = () => {
  * volume, capped cut, per-vertex colouring, one cut already in place -- which
  * is a lot of clicking to discover and easy to get subtly wrong. */
 $('#b-mesh').onclick = async () => {
-  SPEC.layers.push(await getJSON('/api/layer/mesh')); OPEN = SPEC.layers.at(-1).id;
+  /* Opens EMPTY, on the library picker, the same way + Slices does. */
+  await refreshBackdrops();
+  const layer = await getJSON('/api/layer/mesh'); layer.mesh = '';
+  SPEC.layers.push(layer); OPEN = layer.id;
   drawLayers(); render(); };
 $('#b-slices').onclick = async () => {
   await refreshBackdrops();
