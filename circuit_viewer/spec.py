@@ -42,7 +42,8 @@ __all__ = [
     "new_fiber_layer", "new_slice_layer", "new_electrode_layer",
     "new_overlay", "OVERLAY",
     "normalize_spec", "load_spec", "save_spec", "camera_direction", "VIEW_PRESETS",
-    "STATS", "SIGNS", "MODES", "DRAWS", "SPLITS", "FIBER_COLORINGS",
+    "new_volume_layer", "VOLUME_LAYER",
+    "STATS", "SIGNS", "MODES", "DRAWS", "SPLITS", "FIBER_COLORINGS", "OVERLAY_RENDERS",
 ]
 
 SPEC_VERSION = 1
@@ -54,6 +55,9 @@ DRAWS = ("fill", "outline")
 REGION_COLORS = (None, "distinct", "atlas")
 SPLITS = ("auto", "single", "labels", "components", "volumes")
 FIBER_COLORINGS = ("solid", "direction", "value")
+# A body is drawn either by casting rays through it or by painting its skin.
+OVERLAY_RENDERS = ("surface", "volume")
+OPACITY_PROFILES = ("linear", "sigmoid", "geom", "foreground")
 
 # Azimuth is measured in the axial plane from anterior, turning towards the LEFT
 # side of the brain; elevation lifts the camera towards the vertex. Storing the
@@ -195,6 +199,19 @@ OVERLAY = {
     # This spreads values from painted vertices into their unpainted neighbours
     # across the mesh, so a connected patch is coloured throughout.
     "fill_gaps": 0,
+    # Which frame of a 4D map (or of a fibres x time value array) is shown.
+    "frame": 0,
+    # How far the colour scale overrides what is under it, 0..1. At 1 every
+    # value kept is painted at full strength, below-minimum values in the
+    # bottom colour (MRIcroGL's look); lower lets a LUT's own alpha ramp fade
+    # the low end of the scale into the anatomy.
+    "override": 1.0,
+    # Vertex-sampled surfaces only: average each vertex's samples over the
+    # surface around it, about this many millimetres along the mesh, before
+    # sign and threshold decide anything. A 2 mm map sampled at single points
+    # on a folded cortex stripes -- banks inside the map, crowns and fundi just
+    # outside it -- and this closes those stripes. 0 turns it off.
+    "smooth_mm": 2.0,
     "opacity": 1.0,
     # meshes only -- a slice samples where it is, a region has to reduce
     "mode": "region",
@@ -226,6 +243,42 @@ ELECTRODE_LAYER = {
     "contact_color": "#43484f",
     "opacity": 1.0,
     "hidden_regions": [],     # part names, so one contact can be dropped
+}
+
+
+# A NIfTI drawn as a BODY, by ray casting, rather than as a surface or as three
+# plates. Its own kind, because loading a body and cutting through one belong to
+# it, not to the slice layer: a slice plane photographs the data at one
+# coordinate, while a cut here removes part of the body so you can see inside.
+# The body is always rendered from its own scalars; overlays only colour it.
+VOLUME_LAYER = {
+    "kind": "volume",
+    "name": "Volume",
+    "visible": True,
+    "source": "spm152",        # a packaged name, or a NIfTI path
+    # -- the body ----------------------------------------------------------
+    "cmap": "gray",            # matplotlib name or MRIcroGL .clut
+    "color": None,             # a hex tint; overrides cmap when set
+    "clim": None,              # [start, saturate]; None reads it off the data
+    "opacity_profile": "linear",
+    "opacity": 1.0,            # scales the body's opacity transfer function
+    "shade": True,             # gradient shading from the scene's lighting rig
+    # -- how overlays colour it ------------------------------------------
+    # surface: paint the tissue the rays reach (cortex and cut faces) -- the
+    #          body keeps its own shape and lighting, only its colour changes.
+    # volume:  x-ray the overlays through an opaque brain: they are faded by
+    #          depth behind its surface, exp(-depth / xray_depth_mm), never hidden.
+    "overlay_render": "surface",
+    "xray_depth_mm": 8.0,      # volume mode: overlay at this depth shows at 37%
+    "overlay_fade": 0.03,      # volume mode: fraction of the colour scale to fade in over
+    "overlay_smooth_vox": 0.75,  # volume mode: Gaussian on each overlay, its voxels
+    # Overlays are drawn only inside the body unless this is on: a map that
+    # runs past the brain would otherwise show as colour in the air around it.
+    "overlay_outside": False,
+    # Cut the body in world millimetres, same grammar as a mesh layer. Rendered
+    # as clipping planes with a solid cut face.
+    "section": [],
+    "overlays": [],
 }
 
 
@@ -278,6 +331,12 @@ def new_fiber_layer(**overrides):
     return layer
 
 
+def new_volume_layer(**overrides):
+    layer = dict(VOLUME_LAYER, id=_new_id())
+    layer.update(overrides)
+    return layer
+
+
 def new_slice_layer(**overrides):
     layer = dict(SLICE_LAYER, id=_new_id())
     layer.update(overrides)
@@ -293,6 +352,7 @@ def new_spec(layers=None):
         "camera": dict(DEFAULT_CAMERA),
         "lighting": dict(DEFAULT_LIGHTING),
         "parallel": True,
+        "pan": [0.0, 0.0, 0.0],
         "layers": list(layers) if layers else [new_mesh_layer(name="Anatomy")],
     }
 
@@ -323,6 +383,8 @@ def normalize_spec(spec):
         "camera": dict(DEFAULT_CAMERA, **(spec.get("camera") or {})),
         "lighting": dict(DEFAULT_LIGHTING, **(spec.get("lighting") or {})),
         "parallel": bool(spec.get("parallel", True)),
+        # Camera pan in world millimetres, on top of the automatic framing.
+        "pan": [float(v) for v in (list(spec.get("pan") or [0, 0, 0]) + [0, 0, 0])[:3]],
         # Long edge of an exported PNG, in pixels. Export used to be pinned
         # at 1700 wide whatever the Hi-res button said, which is where the
         # pixellation on a zoomed-in figure came from.
@@ -335,10 +397,11 @@ def normalize_spec(spec):
     for raw in spec.get("layers") or []:
         _check(isinstance(raw, dict), "every layer must be an object")
         kind = raw.get("kind", "mesh")
-        _check(kind in ("mesh", "fibers", "slices", "electrode"),
+        _check(kind in ("mesh", "fibers", "slices", "electrode", "volume"),
                f"unknown layer kind {kind!r}")
         base = {"mesh": MESH_LAYER, "fibers": FIBER_LAYER,
-                "slices": SLICE_LAYER, "electrode": ELECTRODE_LAYER}[kind]
+                "slices": SLICE_LAYER, "electrode": ELECTRODE_LAYER,
+                "volume": VOLUME_LAYER}[kind]
         layer = dict(base, id=raw.get("id") or _new_id())
         layer.update({k: v for k, v in raw.items() if k in base or k == "id"})
 
@@ -346,13 +409,27 @@ def normalize_spec(spec):
             layer["id"] = _new_id()
         seen.add(layer["id"])
 
-        if kind in ("mesh", "slices", "fibers"):
+        if kind in ("mesh", "slices", "fibers", "volume"):
             layer["overlays"] = _overlays(raw, layer)
 
         if kind == "electrode":
             layer["hidden_regions"] = [str(r) for r in
                                        (layer.get("hidden_regions") or [])]
             layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
+
+        if kind == "volume":
+            _check(layer["overlay_render"] in OVERLAY_RENDERS,
+                   f"overlay_render must be one of {OVERLAY_RENDERS}")
+            _check(layer["opacity_profile"] in OPACITY_PROFILES,
+                   f"opacity_profile must be one of {OPACITY_PROFILES}")
+            layer["section"] = _section(layer.get("section"))
+            layer["source"] = str(layer.get("source") or "") or None
+            layer["xray_depth_mm"] = min(max(float(layer.get("xray_depth_mm") or 8.0), 0.5), 300.0)
+            layer["color"] = str(layer["color"]) if layer.get("color") else None
+            for key, top in (("opacity", 1.0), ("overlay_fade", 1.0)):
+                layer[key] = min(max(float(layer[key]), 0.0), top)
+            layer["overlay_smooth_vox"] = max(float(layer.get("overlay_smooth_vox") or 0.0), 0.0)
+            layer["overlay_outside"] = bool(layer.get("overlay_outside"))
 
         if kind == "mesh":
             _check(layer["split"] in SPLITS, f"split must be one of {SPLITS}")
@@ -432,6 +509,10 @@ def _overlays(raw, layer):
         item["outline_width"] = max(float(item["outline_width"] or 3.0), 0.5)
         item["outline_smooth"] = max(float(item["outline_smooth"] or 0.0), 0.0)
         item["opacity"] = min(max(float(item["opacity"]), 0.0), 1.0)
+        item["smooth_mm"] = min(max(float(item.get("smooth_mm") or 0.0), 0.0), 20.0)
+        item["frame"] = max(int(item.get("frame") or 0), 0)
+        item["override"] = min(max(float(1.0 if item.get("override") is None
+                                         else item["override"]), 0.0), 1.0)
         for key in ("threshold", "max_value", "min_value", "clim"):
             if item.get(key) in ("", []):
                 item[key] = None

@@ -4,6 +4,10 @@ Converting a 100 um volume is minutes of work -- streaming 8.7 GB through a
 block-average -- so it cannot happen inside a request. One job runs at a time,
 its progress is polled, and the library it writes into accumulates: every volume
 converted once is available to every figure afterwards.
+
+A converted volume is also a volume-layer BODY. One too large to ray-cast whole
+is drawn from block-averaged levels, so the job builds those right after the
+archive, and ``start_levels`` builds them for an archive that predates this.
 """
 
 from __future__ import annotations
@@ -56,16 +60,53 @@ def start(path, mm=None, name=None):
     return status()
 
 
+def start_levels(source):
+    """Build a backdrop's volume levels in the background."""
+    from .volume_render import resolve_source
+
+    path = Path(resolve_source(source))
+    with _lock:
+        if _state["running"]:
+            raise RuntimeError(f"already working on {_state['name']}")
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        _state.update(running=True, progress=0.0, error=None, path=None,
+                      name=f"{path.stem} (volume levels)")
+    Thread(target=_run_levels, args=(path,), daemon=True).start()
+    return status()
+
+
+def _report(fraction):
+    with _lock:
+        _state["progress"] = float(fraction)
+
+
+def _levels(path):
+    from .volume_render import build_levels
+
+    with _lock:
+        _state.update(name=f"{Path(path).stem} (volume levels)", progress=0.0)
+    return build_levels(str(path), progress=_report)
+
+
+def _run_levels(path):
+    try:
+        _levels(path)
+        with _lock:
+            _state.update(running=False, progress=1.0, path=str(path))
+    except Exception as exc:
+        with _lock:
+            _state.update(running=False, error=f"{type(exc).__name__}: {exc}")
+
+
 def _run(source, mm, name):
     from calvin_utils.plotting_utils.backdrops import build_backdrop
 
-    def report(fraction):
-        with _lock:
-            _state["progress"] = float(fraction)
-
     try:
         out = build_backdrop(source, out_dir=BACKDROP_DIR, mm=mm, name=name,
-                             progress=report)
+                             progress=_report)
+        # A no-op for anything small enough to draw whole.
+        _levels(out)
         with _lock:
             _state.update(running=False, progress=1.0, path=str(out))
     except Exception as exc:

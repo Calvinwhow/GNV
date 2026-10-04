@@ -24,4 +24,4 @@ circuit-viewer = "circuit_viewer.app:main"
 include = ["circuit_viewer*"]
 
 [tool.setuptools.package-data]
-circuit_viewer = ["static/*"]
+circuit_viewer = ["static/*", "volumes/*"]

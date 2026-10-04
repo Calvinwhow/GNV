@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -212,13 +213,34 @@ def _section_group(group, layer):
     return kept
 
 
+def _spec_key(overlay):
+    """An overlay's identity for its colour bar: its content, minus its id."""
+    if overlay.get("_spec_key"):
+        return overlay["_spec_key"]
+    return json.dumps({k: v for k, v in overlay.items() if k != "id"},
+                      sort_keys=True, default=str)
+
+
+def _framed(overlay):
+    """A 4D overlay pointed at its current frame (see ``frames``); anything
+    else unchanged. Done here, where every painter collects its overlays, so
+    meshes, slices, bodies and fibres all play a series the same way."""
+    from circuit_viewer import frames
+
+    try:
+        return frames.resolve(overlay, _spec_key(overlay))
+    except Exception:
+        return overlay          # an unreadable file is reported by its painter
+
+
 def _fills(overlays):
     """The overlays that paint a surface; outline overlays only trace one."""
-    return [o for o in (overlays or []) if o.get("draw", "fill") != "outline"]
+    return [_framed(o) for o in (overlays or [])
+            if o.get("draw", "fill") != "outline"]
 
 
 def _outlines(overlays):
-    return [o for o in (overlays or [])
+    return [_framed(o) for o in (overlays or [])
             if o.get("draw") == "outline" and o.get("nifti")]
 
 
@@ -373,6 +395,85 @@ def _thickness_mm(layer):
     return min(max(radius, lo), hi)
 
 
+def _signed_samples(raw, overlay):
+    """The suite's sign rule and |v| applied to samples; excluded become 0."""
+    values = np.asarray(raw, float).copy()
+    values[~np.isfinite(values)] = 0.0
+    if overlay["sign"] == "positive":
+        values[values < 0] = 0.0
+    elif overlay["sign"] == "negative":
+        values[values > 0] = 0.0
+    if overlay["absolute"]:
+        values = np.abs(values)
+    return values
+
+
+_SURFACE_EDGES = {}     # id(mesh) -> (weakref, edges, mean edge length)
+
+
+def _surface_edges(mesh):
+    """Every undirected edge of a surface once, and its mean length; cached
+    per mesh object, which geometry caching keeps alive while it is shown."""
+    import weakref
+
+    key = (id(mesh), mesh.n_points, mesh.n_cells)
+    hit = _SURFACE_EDGES.get(key)
+    if hit is not None and hit[0]() is mesh:
+        return hit[1], hit[2]
+    surface = mesh if mesh.is_all_triangles else mesh.triangulate()
+    faces = np.asarray(surface.faces).reshape(-1, 4)[:, 1:]
+    pairs = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    pairs.sort(axis=1)
+    pairs = np.unique(pairs, axis=0)
+    points = np.asarray(mesh.points)
+    length = float(np.linalg.norm(points[pairs[:, 0]] - points[pairs[:, 1]],
+                                  axis=1).mean()) if len(pairs) else 1.0
+    try:
+        _SURFACE_EDGES[key] = (weakref.ref(mesh), pairs, length)
+    except TypeError:
+        pass
+    while len(_SURFACE_EDGES) > 64:
+        _SURFACE_EDGES.pop(next(iter(_SURFACE_EDGES)))
+    return pairs, length
+
+
+def _vertex_smooth(mesh, values, radius_mm, support=0.5):
+    """Average vertex samples over the surface around each vertex.
+
+    A vertex sample is one point in a 2 mm voxel grid. On a folded cortex the
+    crowns and fundi land just outside a masked map while the banks between
+    them land inside, so a figure stripes: ridges of colour with ridges of
+    nothing between them. Each pass replaces every vertex with the mean of the
+    values in its 1-ring -- itself and its ~6 neighbours -- that HAVE data,
+    and gives an empty vertex a value only when at least ``support`` of its
+    ring has data, which closes a stripe a vertex or two wide without growing a
+    blob outward past its edge. Passes repeat until about ``radius_mm`` of
+    surface is covered, so the reach is the same on a dense mesh and a
+    decimated one. Averaging runs ALONG the mesh: the far bank of a sulcus is
+    never mixed in. Zero is "no data", as everywhere in the suite.
+    """
+    values = np.asarray(values, float)
+    if radius_mm <= 0 or len(values) != mesh.n_points or mesh.n_cells == 0:
+        return values
+    pairs, length = _surface_edges(mesh)
+    if not len(pairs):
+        return values
+    passes = max(1, int(np.ceil(float(radius_mm) / max(length, 1e-6))))
+    a, b = pairs[:, 0], pairs[:, 1]
+    n = len(values)
+    degree = np.bincount(a, minlength=n) + np.bincount(b, minlength=n) + 1.0
+    out = np.where(np.isfinite(values), values, 0.0)
+    for _ in range(min(passes, 50)):
+        has = (out != 0).astype(float)
+        total = out + np.bincount(a, weights=out[b], minlength=n) \
+            + np.bincount(b, weights=out[a], minlength=n)
+        count = has + np.bincount(a, weights=has[b], minlength=n) \
+            + np.bincount(b, weights=has[a], minlength=n)
+        keep = (has > 0) | (count >= support * degree)
+        out = np.where(keep & (count > 0), total / np.maximum(count, 1.0), 0.0)
+    return out
+
+
 class RenderSession:
     def __init__(self, spec=None):
         self.spec = normalize_spec(spec or {})
@@ -384,6 +485,10 @@ class RenderSession:
         self._drawing = None        # the layer being built, for warn()
         self._interiors = {}      # mesh group + step -> interior points
         self._backdrops = {}      # path -> open Backdrop (slices read on demand)
+        self._volume_grids = {}   # (source, level) -> body grid
+        self._quality = "preview" # the render being built, for body levels
+        self._font_scale = 1
+        self.view = None          # the last frame's framing, for panning
         self._plotter = None
         self._plotter_size = None
         self._actors = {}         # layer id -> the actors drawn for it
@@ -547,8 +652,7 @@ class RenderSession:
 
     @staticmethod
     def _overlay_key(overlay):
-        return json.dumps({k: v for k, v in overlay.items() if k != "id"},
-                          sort_keys=True, default=str)
+        return _spec_key(overlay)
 
     def _record_scale(self, overlay, values):
         """Remember the scale an overlay resolved to, for its colour bar.
@@ -618,12 +722,24 @@ class RenderSession:
             from calvin_utils.plotting_utils.mesh_paint import fill_gaps
 
             passes = int(overlay.get("fill_gaps") or 0)
+            smooth_mm = float(overlay.get("smooth_mm") or 0.0)
             out = []
             for part in geom["parts"].values():
-                values = _select(sample_nifti(part.points, overlay["nifti"]),
-                                 sign=overlay["sign"], absolute=overlay["absolute"],
-                                 threshold=overlay["threshold"],
-                                 max_value=overlay.get("max_value"))
+                raw = sample_nifti(part.points, overlay["nifti"])
+                if smooth_mm > 0:
+                    # Sign and |v| first, so the average never mixes in values
+                    # the overlay excludes; the threshold after, so it judges
+                    # the smoothed surface rather than single point samples.
+                    signed = _signed_samples(raw, overlay)
+                    values = _select(_vertex_smooth(part, signed, smooth_mm),
+                                     sign="both", absolute=False,
+                                     threshold=overlay["threshold"],
+                                     max_value=overlay.get("max_value"))
+                else:
+                    values = _select(raw, sign=overlay["sign"],
+                                     absolute=overlay["absolute"],
+                                     threshold=overlay["threshold"],
+                                     max_value=overlay.get("max_value"))
                 if passes:
                     values = fill_gaps(part, values, passes=passes)
                 out.append(values)
@@ -720,9 +836,13 @@ class RenderSession:
             structural = {k: v for k, v in layer.items()
                           if not (layer["kind"] == "slices" and k in "xyz")}
             # The material is in the key because it comes from the lighting.
-            # Quality deliberately is NOT: it changes pixels, never geometry.
+            # Quality deliberately is NOT: it changes pixels, never geometry --
+            # except for a body too large to draw whole, whose LEVEL follows
+            # it. That level is keyed, not the quality, so a body small enough
+            # to draw whole is never rebuilt by toggling hi-res.
+            level = self._volume_level(layer)
             wanted[layer["id"]] = (
-                json.dumps([structural, material], sort_keys=True,
+                json.dumps([structural, material, level], sort_keys=True,
                            default=str),
                 layer)
 
@@ -731,6 +851,11 @@ class RenderSession:
                 self._layer_warnings.pop(layer_id, None)
 
         for layer_id in list(self._actors):
+            if (layer_id in wanted
+                    and self._layer_keys.get(layer_id) != wanted[layer_id][0]
+                    and self._restyle_volume(pl, wanted[layer_id][1], material)):
+                self._layer_keys[layer_id] = wanted[layer_id][0]
+                continue
             if (layer_id not in wanted
                     or self._layer_keys.get(layer_id) != wanted[layer_id][0]):
                 for actor in self._actors.pop(layer_id):
@@ -780,10 +905,35 @@ class RenderSession:
                     axis, float(wanted), cmap=layer.get("cmap"),
                     transparent_below=layer.get("transparent_below"),
                     fill=self._slice_fill(layer),
-                    overlays=_fills(layer.get("overlays")))
+                    overlays=self._slice_overlays(layer))
                 entry[0].points = quad.points
                 entry[1].SetTexture(texture)
                 entry[2] = float(wanted)
+
+    def _slice_overlays(self, layer, record=False):
+        """A slice layer's overlays with their scales pinned to the MAP.
+
+        A plane colours only the values it happens to cut through, and the
+        suite reads an unpinned scale off whatever it is handed -- so every
+        slider step re-scaled the colours, and the colour bar (never recorded
+        for a slice) showed whichever scale another layer had left behind.
+        Pinned from the map's own voxels, a value is the same colour on every
+        plane, in the volume body, and in the bar.
+        """
+        from circuit_viewer import volume_render as vr
+
+        out = []
+        for overlay in _fills(layer.get("overlays")):
+            try:
+                native = vr.native_values(overlay)
+            except (OSError, ValueError) as exc:
+                if record:
+                    self.warn(f"overlay {overlay.get('name') or overlay['nifti']}: {exc}")
+                continue
+            if record:
+                self._record_scale(overlay, native)
+            out.append(vr.pinned(overlay, native))
+        return out
 
     def _slice_fill(self, layer):
         """The colour a slice paints its dropped-out background in, or None.
@@ -804,6 +954,12 @@ class RenderSession:
         self._layer_warnings.pop(layer["id"], None)
         if layer["kind"] == "slices":
             return self._add_slices(pl, layer)
+        if layer["kind"] == "volume":
+            # A body with no file yet is a normal intermediate state, exactly
+            # as it is for fibres: the panel is still on its picker.
+            if not layer.get("source"):
+                return []
+            return self._add_volume(pl, layer, material)
         if layer["kind"] == "fibers":
             # A freshly added fibre layer has no file yet. That is a normal
             # intermediate state, not an error: failing the whole render because
@@ -819,6 +975,95 @@ class RenderSession:
         if not layer.get("mesh"):
             return []           # a fresh mesh layer, still on its picker
         return self._add_mesh(pl, layer, material)
+
+    def _add_volume(self, pl, layer, material, reuse=None):
+        """Ray-cast a body. ``volume_render`` builds the VTK volume; this only
+        adds it, so the scene's lights, background and camera apply to a body
+        exactly as they do to a mesh. A missing or unreadable body is a
+        warning on its layer, not a failed render."""
+        from circuit_viewer import volume_render as vr
+
+        if _outlines(layer.get("overlays")):
+            self.warn("outline overlays are drawn on mesh layers only; "
+                      "skipped on this volume layer")
+        try:
+            source = vr.resolve_source(layer["source"])
+            grid = self._volume_grid(source, self._volume_level(layer) or 1)
+            actor, scales, warnings = vr.build_actor(
+                grid, layer, _fills(layer.get("overlays")), material,
+                reuse=reuse)
+        except (OSError, ValueError, MemoryError, KeyError) as exc:
+            self.warn(f"volume {layer.get('source')}: {exc}")
+            return []
+        for message in warnings:
+            self.warn(message)
+        for values, overlay in scales:
+            self._record_scale(overlay, values)
+        if actor is not reuse:
+            pl.add_actor(actor, reset_camera=False)
+        return [actor]
+
+    def _restyle_volume(self, pl, layer, material):
+        """Update a volume layer in place when only its styling changed.
+
+        Opacity, profile, shading, cuts, x-ray depth, fade -- and in x-ray mode
+        thresholds and palettes -- live in transfer functions, clipping planes
+        and a shader constant. Rebuilding the actor for them re-uploads the
+        whole level to the GPU, which on a hi-res level is what made a slider
+        lag. ``build_actor`` hands back the same actor restyled when its voxels
+        are unchanged, or a new one when they are not. False means "not a
+        volume layer": draw it the ordinary way.
+        """
+        layer_id = layer["id"]
+        old = self._actors.get(layer_id) or []
+        if layer.get("kind") != "volume" or not layer.get("source") \
+                or len(old) != 1:
+            return False
+        self._drawing = layer_id
+        self._layer_warnings.pop(layer_id, None)
+        actors = self._add_volume(pl, layer, material, reuse=old[0])
+        if not actors or actors[0] is not old[0]:
+            pl.remove_actor(old[0], reset_camera=False, render=False)
+        self._actors[layer_id] = actors
+        self._cull_map.pop(layer_id, None)
+        return True
+
+    def _volume_level(self, layer):
+        """The block factor a volume layer is drawn at for this render, or
+        None for anything else. A body under the preview budget is 1 at both
+        qualities; only a large one is drawn coarse while working."""
+        if layer.get("kind") != "volume" or not layer.get("source"):
+            return None
+        from circuit_viewer import volume_render as vr
+
+        try:
+            return vr.level_for(vr.resolve_source(layer["source"]),
+                                self._quality)
+        except Exception:
+            return None         # unreadable: drawing it says why
+
+    def _volume_grid(self, source, level=1):
+        """Grids are cached on the path and level: re-reading one costs more
+        than the rest of a frame, and a slider must not pay for it. Both levels
+        of a large body stay cached, so toggling hi-res back is free."""
+        from circuit_viewer import volume_render as vr
+
+        try:
+            stamp = os.path.getmtime(source)
+        except OSError:
+            stamp = 0.0
+        key = (str(source), int(level), stamp)
+        if key in self._volume_grids:
+            self._volume_grids[key] = self._volume_grids.pop(key)  # most recent
+            return self._volume_grids[key]
+        for old in [k for k in self._volume_grids if k[0] == key[0]
+                    and k[2] != stamp]:
+            del self._volume_grids[old]     # the file changed under us
+        self._volume_grids[key] = vr.load_grid(source, level)
+        # Both levels of the body in use, and a couple of recent others.
+        while len(self._volume_grids) > 4:
+            del self._volume_grids[next(iter(self._volume_grids))]
+        return self._volume_grids[key]
 
     def _add_mesh(self, pl, layer, material):
         geom = self._mesh_geometry(layer)
@@ -969,7 +1214,7 @@ class RenderSession:
                 axis, float(wanted), cmap=layer.get("cmap"),
                 transparent_below=layer.get("transparent_below"),
                 fill=self._slice_fill(layer),
-                overlays=_fills(layer.get("overlays")),
+                overlays=self._slice_overlays(layer, record=True),
             )
             # Unlit on purpose: these are photographs of tissue, and shading
             # them would add a highlight that means nothing anatomically.
@@ -1371,8 +1616,46 @@ class RenderSession:
     def _render(self, size=(760, 640), quality="preview", scalar_bar=True,
                 camera=None, antialias=None):
         size = (int(size[0]), int(size[1]))
-        pl = self._ensure_plotter(size)
+        if antialias is None:
+            antialias = "ssaa" if quality == "export" else "off"
+        # VTK's SSAA pass drops ray-cast volumes -- measured: a body that
+        # renders 14,600 pixels without it renders none with it, and FXAA falls
+        # back to the same pass on EGL/OSMesa builds. A scene with a body is
+        # supersampled here instead: rendered at twice the size with the pass
+        # off, then downsampled with a Lanczos filter, which is the same
+        # antialiasing done by hand and works on every build.
+        factor = 1
+        if antialias in ("ssaa", "fxaa") and self._has_volume():
+            factor, antialias = 2, "off"
+        render_size = (size[0] * factor, size[1] * factor)
+        self._font_scale = factor       # bar text keeps its size after downsampling
+        pl = self._ensure_plotter(render_size)
+        # One render per frame. pyvista renders after nearly every scene edit
+        # -- adding a mesh, removing a bar, resetting the camera -- and a frame
+        # used to draw the whole scene five times over before the one render
+        # that is kept. With a ray-cast body each of those is a full volume
+        # render. Everything below edits the scene silently; the render at the
+        # end is the only one.
+        pl.suppress_rendering = True
+        try:
+            png = self._compose(pl, render_size, quality, scalar_bar, camera,
+                                antialias)
+        finally:
+            pl.suppress_rendering = False
+        if factor == 1:
+            return png
+        from PIL import Image
 
+        image = Image.open(io.BytesIO(png)).convert("RGB")
+        image = image.resize(size, Image.LANCZOS)
+        return _png(np.asarray(image), fast=quality != "export")
+
+    def _has_volume(self):
+        return any(layer.get("kind") == "volume" and layer.get("visible", True)
+                   and layer.get("source") for layer in self.spec["layers"])
+
+    def _compose(self, pl, size, quality, scalar_bar, camera, antialias):
+        self._quality = quality
         self._sync_actors(pl)
 
         cam = dict(self.spec["camera"], **(camera or {}))
@@ -1395,8 +1678,37 @@ class RenderSession:
         # honest choice for a figure someone will measure by eye: two regions
         # the same size render the same size whatever their depth.
         pl.camera.parallel_projection = bool(self.spec.get("parallel", True))
-        pl.reset_camera()
+        pl.renderer.reset_camera(render=False)
         pl.camera.zoom(float(cam["zoom"]))
+        # A fixed framing in millimetres (half the view's height), for figures
+        # that put several views side by side: fitting each view to its own
+        # bounds would draw a cut hemisphere bigger than a whole brain.
+        if cam.get("parallel_scale"):
+            pl.camera.parallel_scale = float(cam["parallel_scale"])
+        # Pan: the framing above centres the scene; a pan slides the camera
+        # and its focal point together, in world millimetres, so a close zoom
+        # can be steered onto any region. Clipping follows the new position.
+        pan = np.asarray(cam.get("pan") or self.spec.get("pan") or (0, 0, 0),
+                         float)[:3]
+        if np.any(pan):
+            pl.camera.focal_point = tuple(np.asarray(pl.camera.focal_point) + pan)
+            pl.camera.position = tuple(np.asarray(pl.camera.position) + pan)
+        pl.renderer.ResetCameraClippingRange()
+        # What one screen unit is in the world, for the browser to pan by.
+        focal = np.asarray(pl.camera.focal_point, float)
+        position = np.asarray(pl.camera.position, float)
+        forward = focal - position
+        forward /= max(np.linalg.norm(forward), 1e-12)
+        view_up = np.asarray(pl.camera.up, float)
+        right = np.cross(forward, view_up)
+        right /= max(np.linalg.norm(right), 1e-12)
+        if pl.camera.parallel_projection:
+            height_mm = 2.0 * float(pl.camera.parallel_scale)
+        else:
+            height_mm = 2.0 * float(np.linalg.norm(focal - position)) * float(
+                np.tan(np.radians(pl.camera.view_angle) / 2.0))
+        self.view = {"height_mm": height_mm, "right": right.tolist(),
+                     "up": view_up.tolist()}
 
         # Removal has to be BY TITLE: remove_scalar_bar() with no argument
         # raises as soon as more than one bar is present, which is exactly the
@@ -1407,7 +1719,7 @@ class RenderSession:
         existing = getattr(pl, "scalar_bars", None)
         for title in list(existing.keys()) if existing is not None else []:
             try:
-                pl.remove_scalar_bar(title)
+                pl.remove_scalar_bar(title, render=False)
             except Exception:
                 pass
         if scalar_bar:
@@ -1440,7 +1752,8 @@ class RenderSession:
                     place = dict(vertical=True, width=0.03, height=0.55,
                                  position_x=0.90, position_y=0.22)
                 pl.add_scalar_bar(mapper=mapper, title=title, color=ink,
-                                  label_font_size=12, title_font_size=11,
+                                  label_font_size=int(12 * self._font_scale),
+                                  title_font_size=int(11 * self._font_scale),
                                   n_labels=4, fmt="%.3g", **place)
 
         # Geometry quality and anti-aliasing are separate choices. Supersampling
@@ -1448,8 +1761,6 @@ class RenderSession:
         # you are going to publish and wrong for looking at it on screen, so the
         # hi-res TOGGLE gets real tubes with cheap AA and only the export pays
         # for both.
-        if antialias is None:
-            antialias = "ssaa" if quality == "export" else "off"
         if antialias == "ssaa":
             pl.enable_anti_aliasing("ssaa")
         elif antialias == "fxaa":
@@ -1461,6 +1772,7 @@ class RenderSession:
         # screenshot() does not re-render for a camera move, so without this the
         # viewport silently freezes on the first frame while every orbit appears
         # to succeed. Found by diffing consecutive frames, not by watching it.
+        pl.suppress_rendering = False
         pl.render()
         image = pl.screenshot(return_img=True)
         return _png(image, fast=quality != "export")
@@ -1478,7 +1790,11 @@ def _bar_mapper_for(cmap, clim):
     import pyvista as pv
     import vtk
 
-    lut = pv.LookupTable(cmap=cmap)
+    from calvin_utils.plotting_utils.palettes import opaque
+
+    # The bar shows the scale's COLOURS. A LUT's alpha ramp (MRIcroGL's fade
+    # their low end out) would draw the bottom of the bar as background.
+    lut = pv.LookupTable(cmap=opaque(cmap) if hasattr(cmap, "N") else cmap)
     lut.scalar_range = (float(clim[0]), float(clim[1]))
     mapper = vtk.vtkPolyDataMapper()
     mapper.SetLookupTable(lut)

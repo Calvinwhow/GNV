@@ -15,6 +15,16 @@ const VIEWS = { anterior:[0,0], left:[90,0], posterior:[180,0],
 
 let SPEC = null, CAT = null, OPEN = null, HIRES = false;
 let busy = false, pending = false;
+let VIEW = null;        // the last frame's framing: height in mm, right / up vectors
+let RECORDING = null;   // frames shown while recording: [{blob, t}]
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+/* Render and wait for THIS frame. render() coalesces requests while one is in
+ * flight, which is right for dragging and wrong for playback, where every
+ * frame has to be shown. */
+async function renderSettled(quality){
+  while (busy) await sleep(15);
+  await render(quality);
+}
 
 /* ---------- server ---------- */
 async function getJSON(u){ const r = await fetch(u); const j = await r.json();
@@ -49,6 +59,9 @@ async function render(quality){
     const old = $('#shot').src;
     $('#shot').src = URL.createObjectURL(blob);
     if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+    const view = r.headers.get('X-View');
+    if (view){ try { VIEW = JSON.parse(view); } catch {} }
+    if (RECORDING) RECORDING.push({blob, t: performance.now()});
     /* The render succeeded but something in it was skipped -- a values file
      * that does not fit its atlas, most often. Say which, in the place errors
      * go, instead of leaving a layer silently unpainted. */
@@ -121,41 +134,6 @@ function pathField(parent, label, value, kind, onchange){
  * like it had silently picked a file. */
 const isVolume = p => /\.(nii(\.gz)?|npz)$/i.test(String(p || ''));
 
-
-/* The one entry point for anything a layer is BUILT from -- a mesh, a slice
- * backdrop, a volume. A new layer opens with only this: pick something prepared
- * from the library, or import a file, and the layer's controls appear once it
- * has something to show. Grouped options are {group, value, label}. */
-function libraryPicker(b, {label, options, value, empty, onpick, actions = [], hint}){
-  const s = el('select');
-  const none = el('option', null, value ? '— other —' : (options.length ? '— choose —' : empty));
-  none.value = ''; s.appendChild(none);
-  const groups = new Map();
-  options.forEach(o => {
-    const key = o.group || '';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(o);
-  });
-  groups.forEach((items, name) => {
-    const parent = name ? el('optgroup') : s;
-    if (name) { parent.label = name; s.appendChild(parent); }
-    items.forEach(o => { const opt = el('option', null, o.label); opt.value = o.value;
-                         if (o.disabled) opt.disabled = true; parent.appendChild(opt); });
-  });
-  s.value = options.some(o => o.value === value) ? value : '';
-  s.onchange = () => { if (s.value) onpick(s.value); };
-  field(b, label, s);
-  if (actions.length){
-    const row = el('div','row'); row.appendChild(el('label', null, ''));
-    const box = el('div','grow inline');
-    actions.forEach(a => { const btn = el('button', null, a.label); btn.onclick = a.onclick;
-                           box.appendChild(btn); });
-    row.appendChild(box); b.appendChild(row);
-  }
-  if (hint) b.appendChild(el('div','hint', hint));
-  return s;
-}
-const backdropLabel = d => `${d.name} · ${d.mm} mm · ${(d.bytes/1e6).toFixed(0)} MB`;
 
 let PALETTES = null;
 
@@ -373,8 +351,57 @@ function pair(a, z, phA, phZ, onchange){
   return box;
 }
 
+/* ---------- 4D series ----------
+ * A 4D NIfTI, or a fibres x time value array, is shown one frame at a time.
+ * The frame row appears on an overlay only when its file has more than one
+ * frame. Play steps through them, waiting for each frame to be drawn, so slow
+ * scenes play slower rather than skipping frames. The colour scale is read
+ * from the whole series, so a value keeps its colour from frame to frame. */
+const FRAMES = {};                 // path -> promise of a frame count
+const PLAYING = new Set();         // overlay ids being played
+function frameCount(path){
+  if (!path) return Promise.resolve(1);
+  if (!(path in FRAMES)){
+    FRAMES[path] = getJSON('/api/frames?' + new URLSearchParams({path}))
+      .then(j => j.frames || 1).catch(() => 1);
+  }
+  return FRAMES[path];
+}
+function frameControls(body, o, stack, set){
+  frameCount(o.nifti).then(n => {
+    if (n <= 1) return;
+    const row = el('div','row'); row.appendChild(el('label', null, 'Frame'));
+    const box = el('div','grow inline');
+    const play = el('button', null, PLAYING.has(o.id) ? '❚❚' : '▶');
+    play.title = 'play the series';
+    const slider = el('input'); slider.type = 'range'; slider.min = 0; slider.max = n - 1;
+    slider.step = 1; slider.value = o.frame || 0;
+    const shown = el('span','hint', `${(o.frame || 0) + 1} / ${n}`);
+    const fps = el('input'); fps.type = 'number'; fps.min = 1; fps.max = 30; fps.step = 1;
+    fps.value = o._fps || 4; fps.title = 'frames per second'; fps.style.width = '3.5em';
+    fps.onchange = () => { o._fps = parseFloat(fps.value) || 4; };
+    const show = k => { o.frame = k; slider.value = k; shown.textContent = `${k + 1} / ${n}`; };
+    slider.oninput = () => { show(parseInt(slider.value)); set('overlays', stack); };
+    play.onclick = async () => {
+      if (PLAYING.has(o.id)){ PLAYING.delete(o.id); play.textContent = '▶'; return; }
+      PLAYING.add(o.id); play.textContent = '❚❚';
+      while (PLAYING.has(o.id)){
+        const t0 = performance.now();
+        show(((o.frame || 0) + 1) % n);
+        await renderSettled();
+        const wait = 1000 / (o._fps || 4) - (performance.now() - t0);
+        if (wait > 0) await sleep(wait);
+      }
+    };
+    box.append(play, slider, shown, fps);
+    row.appendChild(box);
+    body.insertBefore(row, body.children[1] || null);
+  });
+}
+
 function overlayStack(b, L, set, kind){
-  b.appendChild(el('div','sec', kind === 'slices' ? 'Volumes on the slice'
+  b.appendChild(el('div','sec', kind === 'volume' ? 'Volumes painted on the body'
+                              : kind === 'slices' ? 'Volumes on the slice'
                                                   : 'Volumes colouring this group'));
   const stack = L.overlays || (L.overlays = []);
 
@@ -395,7 +422,8 @@ function overlayStack(b, L, set, kind){
     const body = el('div','ovl-body');
     pathField(body, kind === 'fibers' ? 'Values' : 'NIfTI', o.nifti,
               kind === 'fibers' ? 'fibers' : 'volume',
-              v => { o.nifti = v; set('overlays', stack); });
+              v => { o.nifti = v; o.frame = 0; set('overlays', stack); drawLayers(); });
+    frameControls(body, o, stack, set);
     /* Two stages, kept apart on purpose.
      *
      * PROCESSING acts on the volume: it decides which values are in the figure
@@ -405,16 +433,7 @@ function overlayStack(b, L, set, kind){
      * voxels are shown, so moving the colour ends restyles a figure and never
      * rethresholds it. */
     body.appendChild(el('div','sec','Processing — acts on the volume'));
-    /* Fill paints the surface; outline paints nothing and traces the edge of
-     * whatever survives sign and threshold, in this card's colour. A full t map
-     * as a fill with its significant part as an outline is the intended use. */
-    const outline = kind === 'mesh' && o.draw === 'outline';
-    if (kind === 'mesh')
-      field(body, 'Draw as', select(
-        [{value:'fill', label:'fill — colour the surface'},
-         {value:'outline', label:'outline — trace the selected region'}],
-        o.draw || 'fill', v => { o.draw = v; set('overlays', stack); drawLayers(); }));
-    if (kind === 'mesh' && !outline){
+    if (kind === 'mesh'){
       field(body, 'Sample', select(
         [{value:'region',label:'region — one value per mesh'},
          {value:'vertex',label:'vertex — gradient'}],
@@ -437,27 +456,15 @@ function overlayStack(b, L, set, kind){
      * Each pass spreads values into unpainted neighbours ALONG the mesh, so a
      * patch fills from its own data and nothing is invented where a whole
      * connected region is empty. */
-    if (outline){
-      const w = el('input'); w.type = 'number'; w.min = 0.5; w.step = 0.5;
-      w.value = o.outline_width ?? 3;
-      w.onchange = () => { o.outline_width = parseFloat(w.value) || 3; set('overlays', stack); };
-      field(body, 'Line width (px)', w);
-      const sm = el('input'); sm.type = 'number'; sm.min = 0; sm.step = 0.25;
-      sm.value = o.outline_smooth ?? 1;
-      sm.title = 'Gaussian blur of the region, in voxels, before tracing; 0 follows voxel edges';
-      sm.onchange = () => { o.outline_smooth = Math.max(parseFloat(sm.value) || 0, 0); set('overlays', stack); };
-      field(body, 'Edge smoothing (vox)', sm);
-      const opo = el('input'); opo.type='range'; opo.min=0; opo.max=1; opo.step=0.02;
-      opo.value = o.opacity;
-      opo.oninput = () => { o.opacity = parseFloat(opo.value); set('overlays', stack); };
-      field(body, 'Opacity', opo);
-      body.appendChild(el('div','hint',
-        'Traced where this volume survives sign and threshold. Set the ' +
-        'threshold (or give an FWE map) to choose what counts as significant; ' +
-        'the line takes the swatch colour.'));
-      card.appendChild(body);
-      b.appendChild(card);
-      return;
+    if (kind === 'mesh'){
+      /* A 2 mm map sampled at single points on a folded cortex stripes: the
+       * banks land inside it, crowns and fundi just outside. Averaging over a
+       * couple of millimetres of surface -- along the mesh, never across a
+       * sulcus -- before the threshold closes those stripes. Region overlays
+       * reduce whole regions and ignore it. */
+      field(body, 'Smooth (mm)', number(o.smooth_mm ?? 2,
+            v => { o.smooth_mm = v ?? 0; set('overlays', stack); },
+            {step: 0.5, placeholder: '0'}));
     }
     if (kind === 'mesh' && o.mode === 'vertex'){
       /* Stored as a number of passes, so an old spec keeps whatever it was
@@ -521,6 +528,16 @@ function overlayStack(b, L, set, kind){
     op.value = o.opacity;
     op.oninput = () => { o.opacity = parseFloat(op.value); set('overlays', stack); };
     field(body, 'Opacity', op);
+    /* How much the colour scale overrides what is under it. A LUT such as
+     * MRIcroGL's x_rain fades its own low end out; at 1 every value is painted
+     * at full strength -- the bottom colour included, and anything below the
+     * minimum in that colour -- as MRIcroGL draws it. Lower lets the low end
+     * of the scale fade into the anatomy. */
+    const ovr = el('input'); ovr.type='range'; ovr.min=0; ovr.max=1; ovr.step=0.05;
+    ovr.value = o.override ?? 1;
+    ovr.title = 'how strongly the colour scale overrides the anatomy at its low end';
+    ovr.oninput = () => { o.override = parseFloat(ovr.value); set('overlays', stack); };
+    field(body, 'Override brain', ovr);
     card.appendChild(body);
     b.appendChild(card);
   });
@@ -535,85 +552,68 @@ function overlayStack(b, L, set, kind){
   const box = el('div','grow'); box.appendChild(add); row.appendChild(box);
   b.appendChild(row);
   if (!stack.length)
-    b.appendChild(el('div','hint', kind === 'slices'
+    b.appendChild(el('div','hint', kind === 'slices' || kind === 'volume'
       ? 'Add a volume to overlay a finding on the anatomy, or drop one on this layer.'
       : 'With no volume the whole group is drawn in the flat colour above. ' +
         'One volume gets a colour bar; several are composited, later over earlier.'));
 }
 
-const MESH_FILE_RE = /\.(vtk|vtp|ply|obj|stl|gii)$/i;
 function meshBody(b, L, set){
-  /* Anything that is not a registered mesh or a mesh file is surfaced from
-   * volumes -- one NIfTI, a list of them, or a folder -- so it gets the volume
-   * controls (threshold, split). */
-  const builtIn = CAT.meshes.some(m => m.name === L.mesh);
-  const vol = !!L.mesh && !builtIn && !(typeof L.mesh === 'string' && MESH_FILE_RE.test(L.mesh));
-  const lib = (BACKDROPS && BACKDROPS.backdrops) || [];
-  const GROUP = {surface: 'Surfaces', parcels: 'Parcel sets'};
-  const options = [
-    ...CAT.meshes.map(m => ({
-      group: GROUP[m.group] || 'Meshes', value: m.name, disabled: m.available === false,
-      label: (m.available === false ? '— ' : '') + m.name + ' — ' +
-             (m.available === false ? 'not available to this renderer'
-                                    : m.what.replace(/^\[[^\]]*\]\s*/, ''))})),
-    ...lib.map(d => ({group: 'Prepared volumes — surfaced here', value: d.path,
-                      label: backdropLabel(d)})),
-  ];
-  libraryPicker(b, {
-    label: 'Mesh', options, value: Array.isArray(L.mesh) ? '' : L.mesh,
-    empty: '— no meshes found —',
-    onpick: v => {
-      L.mesh = v;
-      if (!L.name || L.name === 'Mesh')
-        L.name = String(v).split('/').pop().replace(/\.(nii(\.gz)?|npz|vtk|vtp)$/i, '');
-      /* A prepared volume colours itself: point a vertex overlay at the same
-       * file, so picking one shows its anatomy rather than a flat grey surface. */
-      const stack = L.overlays || (L.overlays = []);
-      if (isVolume(v) && stack.length && stack[0].mode === 'vertex') stack[0].nifti = v;
-      set('mesh', v); drawLayers(); },
-    actions: [{label: 'Import files or a folder …', onclick: () =>
-      chooseFile('import', $('#m-path').value, p => {
-        if (!L.name || L.name === 'Mesh')
-          L.name = Array.isArray(p) ? `${p.length} volumes` : String(p).split('/').filter(Boolean).pop();
-        /* An import is usually an atlas: colour its regions apart from the start. */
-        if (!MESH_FILE_RE.test(String(p))) L.region_colors = 'atlas';
-        set('mesh', Array.isArray(p) && p.length === 1 ? p[0] : p); drawLayers(); })}],
-    hint: L.mesh ? null :
-      'Pick a prepared surface, parcel set or volume, or import: one NIfTI, several ' +
-      '(⌘/ctrl-click in the chooser), a folder of NIfTIs or parcel meshes, or a 4D ' +
-      'atlas with one parcel per volume. You can also drop files onto the view.',
-  });
-  if (!L.mesh) return;
+  const groups = {};
+  CAT.meshes.forEach(m => (groups[m.group] ||= []).push({
+    value: m.name, disabled: m.available === false,
+    label: (m.available === false ? '— ' : '') + m.name + ' — ' +
+           (m.available === false ? 'not available to this renderer'
+                                  : m.what.replace(/^\[[^\]]*\]\s*/, '')),
+  }));
+  const opts = [...(groups.surface || []), ...(groups.parcels || [])];
+  const vol = isVolume(L.mesh);
 
-  if (vol){
-    if (Array.isArray(L.mesh))
-      b.appendChild(el('div','hint', `${L.mesh.length} volumes: ` +
-        L.mesh.map(p => p.split('/').pop()).join(', ')));
-    else
-      pathField(b, 'Volume', L.mesh, 'volume', v => set('mesh', v || ''));
+  /* Geometry comes either from a mesh that already exists or from a volume we
+   * surface here. One field holds both, because downstream nothing else cares. */
+  field(b, 'Geometry', select(
+    [{value:'mesh', label:'built-in mesh'}, {value:'volume', label:'a NIfTI volume'}],
+    vol ? 'volume' : 'mesh',
+    v => set('mesh', v === 'volume' ? '' : 'pial_wholebrain')));
+
+  if (!vol){
+    field(b, 'Mesh', select(opts, L.mesh, v => set('mesh', v)));
+  } else {
+    /* Prepared backdrops first: they are already resampled and quantised, so
+     * they mesh in seconds and can colour themselves. Any other NIfTI still
+     * works through the path field below. */
+    const lib = (BACKDROPS && BACKDROPS.backdrops) || [];
+    if (lib.length){
+      const chosen = lib.find(d => d.path === L.mesh);
+      field(b, 'Prepared volume', select(
+        [{value:'', label: chosen ? '— other —' : '— choose —'},
+         ...lib.map(d => ({value: d.path,
+           label: `${d.name} · ${d.mm} mm · ${(d.bytes/1e6).toFixed(0)} MB`}))],
+        chosen ? chosen.path : '',
+        v => { if (!v) return;
+               L.mesh = v;
+               /* Point the self-colouring overlay at the same file, so picking a
+                * volume shows its anatomy rather than a flat grey surface. */
+               const stack = L.overlays || (L.overlays = []);
+               if (stack.length && stack[0].mode === 'vertex') stack[0].nifti = v;
+               set('mesh', v); drawLayers(); }));
+    }
+    pathField(b, 'Volume', L.mesh, 'volume', v => set('mesh', v || ''));
     field(b, 'Threshold', number(L.iso, v => set('iso', v === null ? 0 : v)));
     field(b, 'Split', select(
       [{value:'auto',label:'auto'},
        {value:'single',label:'single — one surface'},
        {value:'labels',label:'labels — one per integer value'},
-       {value:'components',label:'components — one per blob'},
-       {value:'volumes',label:'volumes — one per 4th-dimension frame'}],
+       {value:'components',label:'components — one per blob'}],
       L.split, v => set('split', v)));
     const sm = el('input'); sm.type='range'; sm.min=0; sm.max=3; sm.step=0.1;
     sm.value = L.presmooth_vox; sm.title = 'surface smoothing, in voxels';
     sm.onchange = () => set('presmooth_vox', parseFloat(sm.value));
     field(b, 'Surface smooth', sm);
-    if (L.mesh && isVolume(L.mesh)) volumeHint(b, L.mesh);
+    if (L.mesh) volumeHint(b, L.mesh);
     else b.appendChild(el('div','hint','Pick a NIfTI, or drop one onto the view.'));
   }
   field(b, 'Colour', colour(L.color, v => set('color', v)));
-  /* Region sets only: a flat colour, one colour per region, or the atlas's
-   * own colours from its label table (distinct wherever it has none). */
-  field(b, 'Region colours', select(
-    [{value:'', label:'one colour (above)'},
-     {value:'distinct', label:'distinct — one per region'},
-     {value:'atlas', label:'atlas — from its label table'}],
-    L.region_colors || '', v => set('region_colors', v || null)));
 
   const op = el('input'); op.type = 'range'; op.min = 0; op.max = 1; op.step = 0.01;
   op.value = L.opacity; op.oninput = () => set('opacity', parseFloat(op.value));
@@ -679,17 +679,24 @@ async function refreshBackdrops(){
 function sliceBody(b, L, set){
   const lib = (BACKDROPS && BACKDROPS.backdrops) || [];
   const chosen = lib.find(d => d.path === L.backdrop || d.name === L.backdrop);
-  libraryPicker(b, {
-    label: 'Backdrop', value: chosen ? chosen.path : '',
-    options: lib.map(d => ({value: d.path, label: backdropLabel(d)})),
-    empty: '— none converted yet —',
-    onpick: v => set('backdrop', v),
-    actions: [{label: 'Convert a NIfTI …', onclick: () =>
-      chooseFile('volume', $('#m-path').value, p => startConvert(p))}],
-    hint: chosen ? null : 'Converted volumes accumulate in ' +
-      ((BACKDROPS && BACKDROPS.dir) || '?') + ' and are available to every figure afterwards.',
-  });
-  if (!chosen) return;
+  field(b, 'Backdrop', select(
+    [{value:'', label: lib.length ? '— choose —' : '— none converted yet —'},
+     ...lib.map(d => ({value: d.path,
+       label: `${d.name} · ${d.mm} mm · ${(d.bytes/1e6).toFixed(0)} MB`}))],
+    chosen ? chosen.path : '', v => set('backdrop', v || null)));
+
+  const convert = el('button', null, 'Convert a NIfTI …');
+  convert.onclick = () => chooseFile('volume', $('#m-path').value, p => startConvert(p));
+  const cvRow = el('div','row'); cvRow.appendChild(el('label', null, ''));
+  const cvBox = el('div','grow'); cvBox.appendChild(convert); cvRow.appendChild(cvBox);
+  b.appendChild(cvRow);
+
+  if (!chosen){
+    b.appendChild(el('div','hint',
+      'Converted volumes accumulate in ' + ((BACKDROPS && BACKDROPS.dir) || '?') +
+      ' and are available to every figure afterwards.'));
+    return;
+  }
 
   /* Sliders run in WORLD millimetres over this backdrop's own bounds, so the
    * numbers mean the same thing as every coordinate elsewhere in the app. */
@@ -755,7 +762,169 @@ function sliceBody(b, L, set){
   overlayStack(b, L, set, 'slices');
 }
 
-async function startConvert(path){
+/* ---------- volume layer ----------
+ * A body, ray-cast from its own scalars: colour and opacity transfer functions
+ * over a window, linear interpolation, the scene's lighting. Overlays only
+ * colour it -- painted onto the tissue the rays reach, or ray-cast as shaded
+ * colour volumes inside a body made translucent. Cutting lives here rather than
+ * on the slice layer, because removing part of a body is a different operation
+ * from photographing it at one coordinate.
+ */
+let VOLUMES = null;
+async function refreshVolumes(){
+  try { VOLUMES = await getJSON('/api/volumes'); } catch { VOLUMES = []; }
+  return VOLUMES;
+}
+
+function volumeBody(b, L, set){
+  if (VOLUMES === null){ refreshVolumes().then(() => drawLayers()); }
+  /* Prepared bodies only, exactly like the slice layer's backdrops: the
+   * packaged ones, then everything the converter has turned into an .npz
+   * (8-bit to the GPU, levels built for anything large). A new NIfTI goes
+   * through the same preparation and is selected once it is ready. A body
+   * set by path in an older figure still shows, under its file name. */
+  const lib = VOLUMES || [];
+  const entry = lib.find(v => v.name === L.source);
+  const options = lib.map(v => ({value: v.name, label: v.label || v.name}));
+  if (L.source && !entry){
+    options.unshift({value: L.source,
+                     label: 'file · ' + String(L.source).split('/').pop()});
+  }
+  if (!L.source) options.unshift({value: '', label: '— choose —'});
+  field(b, 'Body', select(options, L.source || '', v => set('source', v || null)));
+  const prepare = el('button', null, 'Prepare a NIfTI …');
+  prepare.title = 'convert a NIfTI into a prepared body (the same conversion ' +
+                  'as a slice backdrop); it is selected here when ready';
+  prepare.onclick = () => chooseFile('volume', $('#m-path').value,
+    p => startConvert(p, out => set('source', out.replace(/^.*\//, '').replace(/\.npz$/i, ''))));
+  field(b, '', prepare);
+
+  /* A body too large to ray-cast whole is drawn from block-averaged levels:
+   * coarse while you rotate, cut and edit; the finest that fits for hi-res
+   * and export. Each is built once and kept beside the archive. */
+  const mmText = x => String(Math.round(x * 100) / 100);
+  if (entry && entry.export_mm && entry.preview_mm > entry.mm * 1.0001){
+    b.appendChild(el('div','hint',
+      `${entry.shape.join('×')} at ${mmText(entry.mm)} mm is too large to ` +
+      `ray-cast whole: it is drawn at ${mmText(entry.preview_mm)} mm while you ` +
+      `work, and at ${mmText(entry.export_mm)} mm for hi-res and export.`));
+    if (!entry.levels_ready){
+      const prep = el('button', null, 'Prepare levels');
+      prep.title = 'build both levels once, in the background — otherwise the ' +
+                   'first render builds them and stalls until they exist';
+      prep.onclick = async () => {
+        try { await postJSON('/api/volumes/levels', {source: L.source}); pollConvert(); }
+        catch (e) { status(e.message, true); }
+      };
+      field(b, 'Levels', prep);
+    }
+  }
+
+  const pal = [{value:'gray', label:'gray'}];
+  if (PALETTES){
+    PALETTES.clut.forEach(n => pal.push({value:n, label:'MRIcroGL · ' + n}));
+    PALETTES.matplotlib.forEach(n => { if (n !== 'gray') pal.push({value:n, label:'matplotlib · ' + n}); });
+  } else { refreshPalettes().then(() => drawLayers()); }
+  /* Greys by default -- a T1's own texture, as in MRIcroGL. A tint colours
+   * that texture rather than replacing it: every colour keeps its brightness
+   * and takes the tint's hue. */
+  field(b, 'Colour', select(pal, L.cmap || 'gray', v => set('cmap', v)));
+  /* The checkbox turns the tint on and off; the swatch picks it. Neither
+   * rebuilds the panel, so the native colour picker stays open while you drag
+   * through it -- the swatch is enabled in place, and picking a colour turns
+   * the tint on if it was off. */
+  const tintBox = el('div','grow inline');
+  const tint = el('input'); tint.type = 'color'; tint.value = L.color || '#d9c2a6';
+  const tintOn = el('input'); tintOn.type = 'checkbox'; tintOn.checked = !!L.color;
+  tintOn.title = 'tint the palette, keeping its brightness';
+  const tintText = el('span','hint', L.color || 'off');
+  tintOn.onchange = () => {
+    set('color', tintOn.checked ? tint.value : null);
+    tintText.textContent = tintOn.checked ? tint.value : 'off';
+  };
+  tint.oninput = () => {
+    tintOn.checked = true;
+    tintText.textContent = tint.value;
+    set('color', tint.value);
+  };
+  tintBox.append(tintOn, tint, tintText);
+  field(b, 'Tint', tintBox);
+
+  /* Where the body starts and saturates. Blank reads it off the data: the
+   * start is the split between background/CSF and tissue, so the cortex is
+   * the surface; the end is the 99th percentile. */
+  const thr = pair(L.clim ? L.clim[0] : null, L.clim ? L.clim[1] : null,
+                   'auto', 'auto',
+                   (a, z) => set('clim', (a !== null && z !== null) ? [a, z] : null));
+  thr.title = 'threshold: where the body becomes visible / where it saturates — ' +
+              'blank reads both off the data';
+  field(b, 'Threshold', thr);
+
+  field(b, 'Opacity profile', select(
+    [{value:'linear',     label:'Linear — density reads as density'},
+     {value:'sigmoid',    label:'Sigmoid — a soft threshold'},
+     {value:'geom',       label:'Top-weighted — faint tail'},
+     {value:'foreground', label:'Foreground — flat, solid'}],
+    L.opacity_profile || 'linear', v => set('opacity_profile', v)));
+  const op = el('input'); op.type='range'; op.min=0; op.max=1; op.step=0.01;
+  op.value = L.opacity; op.oninput = () => set('opacity', parseFloat(op.value));
+  field(b, 'Opacity', op);
+  field(b, 'Shade', check(L.shade !== false, v => set('shade', v),
+                          'gradient shading from the scene lighting'));
+
+  field(b, 'Overlays', select(
+    [{value:'surface', label:'Paint the tissue the rays reach'},
+     {value:'volume',  label:'X-ray through the brain'}],
+    L.overlay_render || 'surface', v => set('overlay_render', v)));
+  {
+    /* Always shown: they shape x-rayed overlays and are simply unused while
+     * overlays are painted on the surface.
+     * X-ray: the brain is rendered as it always is -- opaque and lit -- and
+     * the overlays are ray-cast through it on their own, each sample dimmed by
+     * how deep behind the brain's surface it sits, exp(-depth / this). At this
+     * depth a blob shows at 37%, at twice it 14%. Small: just under the cortex
+     * (or a cut face). Large: everything the ray crosses. */
+    const depth = el('input'); depth.type='range'; depth.min=0.5; depth.max=60; depth.step=0.5;
+    depth.value = L.xray_depth_mm ?? 8;
+    const shown = el('span','hint', (L.xray_depth_mm ?? 8) + ' mm');
+    depth.oninput = () => { shown.textContent = depth.value + ' mm'; };
+    depth.onchange = () => set('xray_depth_mm', parseFloat(depth.value));
+    const wrap = el('div','grow inline'); wrap.append(depth, shown);
+    b.appendChild(el('div','sec', 'X-ray' +
+      ((L.overlay_render || 'surface') === 'volume' ? '' : ' — used when overlays are x-rayed')));
+    field(b, 'X-ray depth', wrap);
+    const fade = el('input'); fade.type='range'; fade.min=0; fade.max=1; fade.step=0.05;
+    fade.value = L.overlay_fade ?? 0.03;
+    fade.title = 'how much of each scale an overlay fades in over, from its threshold';
+    fade.oninput = () => set('overlay_fade', parseFloat(fade.value));
+    field(b, 'Fade in', fade);
+    field(b, 'Smooth (vox)', number(L.overlay_smooth_vox ?? 0.75,
+          v => set('overlay_smooth_vox', v ?? 0), {step: 0.25, placeholder: '0'}));
+  }
+
+  /* Overlays stay inside the body unless asked otherwise: a map that runs past
+   * the brain would otherwise hang as colour in the air around it. */
+  field(b, 'Allow outside volume', check(!!L.overlay_outside,
+        v => set('overlay_outside', v),
+        'draw overlay values that fall outside the body as well'));
+
+  sectionEditor(b, L, set);
+  b.appendChild(el('div','hint', (L.overlay_render || 'surface') === 'volume'
+    ? 'Overlays are ray-cast through the brain, which stays opaque and lit. ' +
+      'Each overlay sample is dimmed by its depth behind the brain\'s surface ' +
+      '(or a cut face), so shallow colour is bright and deep colour faint but ' +
+      'never hidden. Use a section to bring anything deep to the surface. ' +
+      'Fade-in keeps a blob\'s edge from terracing; smoothing rounds the voxel ' +
+      'staircase a masked map has at its edge — set it to 0 to turn it off.'
+    : 'The body keeps its own shape and lighting; overlays change only its ' +
+      'colour, on the cortex and on every cut face. Cuts are clipping planes ' +
+      'with a solid face, so a cut through white matter reads as a flat section.'));
+  overlayStack(b, L, set, 'volume');
+}
+
+let CONVERT_DONE = null;   // what to do with a finished conversion, if anything
+
+async function startConvert(path, onDone){
   const answer = prompt(
     'Resolution in mm.\n\n' +
     'Leave blank for NATIVE — the scan\'s own voxel size, which is the point ' +
@@ -766,6 +935,7 @@ async function startConvert(path){
   const mm = answer.trim() === '' ? null : parseFloat(answer);
   try {
     await postJSON('/api/backdrops', {path, mm});
+    CONVERT_DONE = onDone || null;
     pollConvert();
   } catch (e) { status(e.message, true); }
 }
@@ -779,7 +949,10 @@ async function pollConvert(){
       setTimeout(pollConvert, 1200); return;
     }
     await refreshBackdrops();
-    status('backdrop ready: ' + (j.name || ''));
+    await refreshVolumes();
+    status('ready: ' + (j.name || ''));
+    const done = CONVERT_DONE; CONVERT_DONE = null;
+    if (done && j.path && /\.npz$/i.test(j.path)) done(j.path);
     drawLayers();
   } catch (e) { status(e.message, true); }
 }
@@ -817,10 +990,31 @@ function pruneEditor(b, L, set){
     const row = el('div','row');
     const on = el('input'); on.type='checkbox'; on.checked = g.enabled !== false;
     on.onchange = () => { g.enabled = on.checked; set('prune', gates); };
-    const mode = select([{value:'through', label:'through'},
-                         {value:'avoid',   label:'avoid'}], g.mode || 'through',
+    const mode = select([{value:'through', label:'hits'},
+                         {value:'avoid',   label:'avoids'}], g.mode || 'through',
                         v => { g.mode = v; set('prune', gates); });
     mode.style.cssText = 'width:86px;flex:0 0 86px';
+
+    /* A VOLUME gate: the ROI is a NIfTI rather than a plane. A fibre is inside
+     * it wherever |value| > threshold, so a binary mask at 0 means "any
+     * non-zero voxel" and a t-map at 2 means either tail. */
+    if (g.kind === 'volume'){
+      const del2 = el('button','icon','✕');
+      del2.onclick = () => { gates.splice(i,1); set('prune', gates); drawLayers(); };
+      const name = el('div','name', (g.nifti || '(no volume)').split('/').pop());
+      name.title = g.nifti || '';
+      const thr = el('input'); thr.type='number'; thr.step=0.1;
+      thr.value = g.threshold == null ? 0 : g.threshold;
+      thr.title = 'a voxel counts as inside when |value| is above this';
+      thr.style.cssText = 'width:64px;flex:0 0 64px;text-align:right';
+      thr.onchange = () => { g.threshold = parseFloat(thr.value) || 0;
+                             set('prune', gates); };
+      const vbox = el('div','grow inline');
+      vbox.append(on, mode, name, el('span',null,'>'), thr, del2);
+      row.appendChild(el('label', null, i ? 'and' : 'keep'));
+      row.appendChild(vbox); body.appendChild(row);
+      return;
+    }
     const ax = select([{value:'x',label:'X'},{value:'y',label:'Y'},{value:'z',label:'Z'}],
                       g.axis, v => { g.axis = v; set('prune', gates); });
     ax.style.cssText = 'width:50px;flex:0 0 50px';
@@ -851,7 +1045,9 @@ function pruneEditor(b, L, set){
   const box = el('div','grow'); box.appendChild(add); row.appendChild(box);
   body.appendChild(row);
   body.appendChild(el('div','hint',
-    'Each gate is a plane in world millimetres. "through" keeps only fibres ' +
+    'Drop a NIfTI on this layer to gate on an ROI: fibres that hit it, or ' +
+    'that avoid it. A plane gate is the same idea in world millimetres. ' +
+    '"through" keeps only fibres ' +
     'that cross it, "avoid" drops them; gates combine, so several together ' +
     'isolate one bundle out of a whole-brain atlas. Applies to this layer ' +
     'only, and to the exported figure exactly as shown here.'));
@@ -886,7 +1082,7 @@ function fiberBody(b, L, set){
   field(b, 'Opacity', op);
 
   /* One value per atlas fibre, layered. The atlas is the geometry and each
-   * .fib.npy is a finding painted onto it, so a bundle can carry a
+   * .fib.values.npy is a finding painted onto it, so a bundle can carry a
    * background colouring that later findings overwrite only where they have
    * something to say. */
   overlayStack(b, L, set, 'fibers');
@@ -910,7 +1106,11 @@ function fiberBody(b, L, set){
 /* Enough to close the speckle without smearing a map across the cortex. */
 const FILL_PASSES = 3;
 
-const RESTRUCTURE = new Set(['coloring', 'mesh', 'backdrop']);
+/* Fields that change which controls a panel shows, so editing them rebuilds
+ * it: a volume's body (its size hints and levels button) and how its overlays
+ * are drawn (the x-ray heading). */
+const RESTRUCTURE = new Set(['coloring', 'mesh', 'backdrop', 'source',
+                             'overlay_render']);
 
 const LIGHT_CONTROLS = [
   ['key_azimuth',    'Key azimuth',   -180, 180, 1],
@@ -1025,7 +1225,7 @@ function drawLayers(){
         render();
       };
       ({mesh: meshBody, fibers: fiberBody, slices: sliceBody,
-        electrode: electrodeBody}[L.kind])(body, L, set);
+        electrode: electrodeBody, volume: volumeBody}[L.kind])(body, L, set);
       card.appendChild(body);
     }
     host.appendChild(card);
@@ -1039,7 +1239,6 @@ async function volumeHint(parent, path){
     const v = await getJSON('/api/volume?' + new URLSearchParams({path}));
     note.textContent = `${v.shape.join('×')} · range ${v.min.toFixed(2)}…` +
       `${v.max.toFixed(2)} · ${v.distinct.toLocaleString()} distinct value(s)` +
-      (v.frames > 1 ? ` · ${v.frames} volumes along the 4th dimension` : '') +
       ` · auto → ${v.suggested_split}`;
   } catch (e) { note.textContent = e.message; }
 }
@@ -1052,17 +1251,13 @@ async function volumeHint(parent, path){
  * is the only thing that says which -- so every target highlights on hover.
  */
 const VOLUME_RE = /\.nii(\.gz)?$/i;
-const TRACT_RE  = /\.(mat|tck|trk|json|npz|npy)$/i;
-/* Values, not geometry: one number per atlas fibre. Exclude these from the
- * broader tract pattern, which also accepts ordinary .npy geometry atlases. */
-const VALUES_RE = /\.fib\.npy$/i;
+const TRACT_RE  = /\.(mat|tck|trk|json|npz)$/i;
+/* Values, not geometry: one number per atlas fibre. Checked before the
+ * tract pattern, because .fib.values.npy matches neither cleanly. */
+const VALUES_RE = /\.fib\.values\.npy$|\.values\.npy$|\.fib\.npy$/i;
 /* The descriptor stands in for the values it describes, so dropping one on a
  * layer that already has fibres adds a finding rather than replacing them. */
-const DESC_RE   = /\.fib\.json$/i;
-
-function isTractFile(name){
-  return TRACT_RE.test(name) && !VALUES_RE.test(name);
-}
+const DESC_RE   = /\.fib\.desc\.json$/i;
 
 async function upload(files){
   const out = [];
@@ -1079,9 +1274,9 @@ async function upload(files){
 
 async function dropAsNewGroup(files){
   const volumes = files.filter(f => VOLUME_RE.test(f.name));
-  const tracts  = files.filter(f => isTractFile(f.name));
+  const tracts  = files.filter(f => TRACT_RE.test(f.name));
   if (!volumes.length && !tracts.length)
-    throw new Error('drop a .nii/.nii.gz volume, a tractogram, a .fib.json result, or a lead .mat/.json');
+    throw new Error('drop a .nii/.nii.gz volume, a .mat/.tck tractogram, or a lead .mat/.json');
 
   if (volumes.length){
     const up = await upload(volumes);
@@ -1089,7 +1284,7 @@ async function dropAsNewGroup(files){
     Object.assign(layer, {
       name: up.length === 1 ? up[0].name.split('.nii')[0] : `${up.length} volumes`,
       mesh: up.length === 1 ? up[0].path : up.map(u => u.path),
-      color: '#c15656', tessellate: 0, split: 'auto', region_colors: 'atlas',
+      color: '#c15656', tessellate: 0, split: 'auto',
     });
     SPEC.layers.push(layer); OPEN = layer.id;
     status(`surfacing ${up.length} volume(s) — this takes a moment …`);
@@ -1103,7 +1298,7 @@ async function dropAsNewGroup(files){
       if (u.kind === 'fiber_desc'){
         /* A descriptor is a whole layer in one file: it names the atlas the
          * values were written against, so dropping one gives the fibres AND
-         * the first finding on them. More .fib.npy files can then be dropped
+         * the first finding on them. More .fib.values.npy can then be dropped
          * onto the layer. */
         const d = await getJSON('/api/descriptor?path=' + encodeURIComponent(u.path));
         const layer = await getJSON('/api/layer/fibers');
@@ -1126,7 +1321,7 @@ async function dropAsNewGroup(files){
 
 async function dropOntoLayer(layer, files){
   const volumes = files.filter(f => VOLUME_RE.test(f.name));
-  const tracts  = files.filter(f => isTractFile(f.name));
+  const tracts  = files.filter(f => TRACT_RE.test(f.name));
 
   if (layer.kind === 'fibers'){
     const vals = files.filter(f => VALUES_RE.test(f.name) || DESC_RE.test(f.name));
@@ -1152,8 +1347,18 @@ async function dropOntoLayer(layer, files){
       status(`adding ${vals.length} finding(s) to ${layer.name} …`);
     } else if (tracts.length){
       layer.source = (await upload(tracts))[0].path;
+    } else if (volumes.length){
+      /* A NIfTI cannot be per-fibre values, so on a fibre layer it can only
+       * mean an ROI. It used to be rejected outright; now it lands as a prune
+       * gate, which is the whole "drop a volume in and keep what hits it". */
+      const gates = layer.prune || (layer.prune = []);
+      for (const up of await upload(volumes))
+        gates.push({kind:'volume', nifti: up.path, threshold: 0,
+                    mode:'through', enabled:true});
+      status(`gating ${layer.name} on ${volumes.length} ROI(s) …`);
     } else {
-      throw new Error('a fiber layer takes an atlas, a tractogram, .fib.npy values, or a .fib.json result');
+      throw new Error('a fiber layer takes an atlas, a tractogram, a ' +
+                      '.fib.values.npy, or a NIfTI to gate on');
     }
   } else {
     if (!volumes.length) throw new Error('drop a NIfTI here to colour this group');
@@ -1198,43 +1403,23 @@ $('#newgroup').addEventListener('click', () => $('#b-mesh').click());
 
 /* ---------- file chooser ---------- */
 let chooserResolve = null;
-/* 'import' is the mesh entry point: one file, several (ctrl / cmd / shift-click),
- * or the folder being shown. Every other kind picks exactly one file. */
-let CHOOSE_MANY = false;
-let PICKED = [];
 async function browse(path, kind){
   const j = await getJSON('/api/browse?' + new URLSearchParams({path: path || '', kind}));
   $('#m-path').value = j.path;
   const list = $('#list'); list.innerHTML = '';
   j.entries.forEach(e => {
     const row = el('div', e.dir ? 'd' : '', (e.dir ? '📁 ' : '📄 ') + e.name);
-    if (PICKED.includes(e.path)) row.classList.add('sel');
-    row.onclick = ev => {
-      if (e.dir) { browse(e.path, kind); return; }
-      if (CHOOSE_MANY && (ev.metaKey || ev.ctrlKey || ev.shiftKey)){
-        const at = PICKED.indexOf(e.path);
-        if (at >= 0) PICKED.splice(at, 1); else PICKED.push(e.path);
-        row.classList.toggle('sel', at < 0);
-      } else {
-        PICKED = [e.path];
-        list.querySelectorAll('.sel').forEach(n => n.classList.remove('sel'));
-        row.classList.add('sel');
-      }
-      $('#m-name').value = PICKED.length > 1 ? `${PICKED.length} files selected` : (PICKED[0] || '');
-    };
-    row.ondblclick = () => { if (!e.dir) finishChoose(PICKED.length > 1 ? PICKED.slice() : e.path); };
+    row.onclick = () => { if (e.dir) browse(e.path, kind);
+                          else { $('#m-name').value = e.path; } };
+    row.ondblclick = () => { if (!e.dir) finishChoose(e.path); };
     list.appendChild(row);
   });
   $('#m-up').onclick = () => browse(j.parent, kind);
 }
 function chooseFile(kind, start, cb){
   chooserResolve = cb;
-  CHOOSE_MANY = kind === 'import'; PICKED = [];
-  $('#modal').classList.toggle('pick-many', CHOOSE_MANY);
   $('#m-title').textContent = {volume:'Choose a NIfTI', fibers:'Choose a fiber file',
-                               save:'Save as', mesh:'Choose a mesh',
-                               import:'Choose a file, several files (⌘/ctrl-click), or a folder'}[kind]
-                              || 'Choose a file';
+                               save:'Save as', mesh:'Choose a mesh'}[kind] || 'Choose a file';
   $('#m-name').value = '';
   $('#modal').classList.add('on');
   browse(start, kind).catch(e => status(e.message, true));
@@ -1245,39 +1430,70 @@ function finishChoose(path){
   if (cb) cb(path);
 }
 $('#m-cancel').onclick = () => { $('#modal').classList.remove('on'); chooserResolve = null; };
-$('#m-ok').onclick = () => {
-  if (CHOOSE_MANY && PICKED.length > 1) { finishChoose(PICKED.slice()); return; }
-  const v = $('#m-name').value.trim();
+$('#m-ok').onclick = () => { const v = $('#m-name').value.trim();
   if (v) finishChoose(v.includes('/') ? v : ($('#m-path').value + '/' + v)); };
-$('#m-folder').onclick = () => { const d = $('#m-path').value.trim(); if (d) finishChoose(d); };
 $('#m-path').onchange = () => browse($('#m-path').value, 'any').catch(e => status(e.message, true));
 
-/* ---------- orbit ---------- */
+/* ---------- orbit, pan, zoom ----------
+ * Left-drag orbits. Right-drag, middle-drag or shift-drag pans: the camera and
+ * its focal point slide together, by exactly the distance the cursor moved, so
+ * a close zoom can be steered onto any region. The wheel zooms towards the
+ * cursor, with no practical limit, for ultra-high-resolution bodies. */
 const stage = $('#stage');
 let drag = null;
+stage.addEventListener('contextmenu', e => e.preventDefault());
 stage.addEventListener('mousedown', e => {
-  drag = {x: e.clientX, y: e.clientY, az: SPEC.camera.azimuth, el: SPEC.camera.elevation};
+  const pan = e.button === 1 || e.button === 2 || e.shiftKey;
+  drag = {x: e.clientX, y: e.clientY, az: SPEC.camera.azimuth, el: SPEC.camera.elevation,
+          pan, start: (SPEC.pan || [0, 0, 0]).slice()};
   stage.classList.add('drag');
+  e.preventDefault();
 });
+function mmPerPixel(){
+  const h = stage.getBoundingClientRect().height || 1;
+  return VIEW ? VIEW.height_mm / h : 0;
+}
 window.addEventListener('mousemove', e => {
   if (!drag) return;
-  SPEC.camera.azimuth = (drag.az + (e.clientX - drag.x) * 0.45) % 360;
-  SPEC.camera.elevation = Math.max(-89.9, Math.min(89.9, drag.el - (e.clientY - drag.y) * 0.45));
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (drag.pan){
+    if (!VIEW) return;
+    const mm = mmPerPixel();
+    SPEC.pan = [0, 1, 2].map(k => drag.start[k] - VIEW.right[k] * dx * mm
+                                                + VIEW.up[k] * dy * mm);
+  } else {
+    SPEC.camera.azimuth = (drag.az + dx * 0.45) % 360;
+    SPEC.camera.elevation = Math.max(-89.9, Math.min(89.9, drag.el - dy * 0.45));
+  }
   render();
 });
 window.addEventListener('mouseup', () => { drag = null; stage.classList.remove('drag'); });
 stage.addEventListener('wheel', e => {
   e.preventDefault();
-  SPEC.camera.zoom = Math.max(0.4, Math.min(4, SPEC.camera.zoom * (e.deltaY > 0 ? 0.94 : 1.064)));
+  const f = e.deltaY > 0 ? 0.94 : 1.064;
+  const zoom = Math.max(0.05, Math.min(400, SPEC.camera.zoom * f));
+  const applied = zoom / SPEC.camera.zoom;
+  if (VIEW && applied !== 1){
+    /* Keep the point under the cursor where it is. */
+    const box = stage.getBoundingClientRect();
+    const cx = e.clientX - box.left - box.width / 2;
+    const cy = e.clientY - box.top - box.height / 2;
+    const mm = mmPerPixel();
+    const pan = SPEC.pan || [0, 0, 0];
+    SPEC.pan = [0, 1, 2].map(k => pan[k] + (VIEW.right[k] * cx * mm
+                                          - VIEW.up[k] * cy * mm) * (1 - 1 / applied));
+  }
+  SPEC.camera.zoom = zoom;
   render();
 }, {passive: false});
 
 /* ---------- toolbar ---------- */
 document.querySelectorAll('[data-view]').forEach(b => b.onclick = () => {
   const [az, elv] = VIEWS[b.dataset.view];
-  SPEC.camera.azimuth = az; SPEC.camera.elevation = elv; render();
+  SPEC.camera.azimuth = az; SPEC.camera.elevation = elv; SPEC.pan = [0, 0, 0]; render();
 });
-$('#b-reset').onclick = () => { SPEC.camera = {azimuth:90, elevation:0, zoom:1.0}; render(); };
+$('#b-reset').onclick = () => {
+  SPEC.camera = {azimuth:90, elevation:0, zoom:1.0}; SPEC.pan = [0, 0, 0]; render(); };
 /* Hi-res swaps streamlines from line primitives to real swept tubes. It is a
  * second or two of geometry for 30k fibres, which is the right trade for a
  * screenshot and the wrong one while orbiting -- so it is a button, not a mode
@@ -1292,11 +1508,15 @@ $('#b-hires').onclick = () => {
  * volume, capped cut, per-vertex colouring, one cut already in place -- which
  * is a lot of clicking to discover and easy to get subtly wrong. */
 $('#b-mesh').onclick = async () => {
-  /* Opens EMPTY, on the library picker, the same way + Slices does. */
-  await refreshBackdrops();
-  const layer = await getJSON('/api/layer/mesh'); layer.mesh = '';
-  SPEC.layers.push(layer); OPEN = layer.id;
+  SPEC.layers.push(await getJSON('/api/layer/mesh')); OPEN = SPEC.layers.at(-1).id;
   drawLayers(); render(); };
+$('#b-volume').onclick = async () => {
+  /* The prepared bodies are fetched first, so the new card opens with its
+   * dropdown already filled rather than empty until it is reopened. */
+  await refreshVolumes();
+  SPEC.layers.unshift(await getJSON('/api/layer/volume'));
+  OPEN = SPEC.layers[0].id; drawLayers(); render();
+};
 $('#b-slices').onclick = async () => {
   await refreshBackdrops();
   SPEC.layers.unshift(await getJSON('/api/layer/slices'));
@@ -1329,6 +1549,172 @@ $('#b-export').onclick = () => chooseFile('save', $('#m-path').value, async p =>
           height: Math.round(stage.height * scale),
                                                  scalar_bar: true});
         status('exported ' + j.path); } catch (e) { status(e.message, true); } });
+
+/* ---------- animation: recording and camera paths ----------
+ * A small floating panel, opened from the view bar so it costs the side panel
+ * nothing. RECORD keeps every frame the view shows while you orbit, pan, zoom
+ * or play a series, with how long each stayed up, and writes them as a GIF.
+ * A PATH moves the camera by itself -- orbit, rock, tilt, zoom, or through
+ * keyframes you set -- optionally stepping 4D series along with it. Preview
+ * plays it here; Render GIF draws it frame by frame on the server at a chosen
+ * size and quality, independent of how fast the screen keeps up. */
+let KEYS = [], PATH_STOP = false;
+function cameraNow(){
+  return {azimuth: SPEC.camera.azimuth, elevation: SPEC.camera.elevation,
+          zoom: SPEC.camera.zoom, pan: (SPEC.pan || [0, 0, 0]).slice()};
+}
+const ease = t => t * t * (3 - 2 * t);
+function lerpCamera(a, b, t){
+  let dAz = ((b.azimuth - a.azimuth) % 360 + 540) % 360 - 180;   // shortest way round
+  return {azimuth: a.azimuth + dAz * t,
+          elevation: a.elevation + (b.elevation - a.elevation) * t,
+          zoom: a.zoom * Math.pow(b.zoom / a.zoom, t),
+          pan: [0, 1, 2].map(k => a.pan[k] + (b.pan[k] - a.pan[k]) * t)};
+}
+async function pathSteps(preset, n, series){
+  const base = cameraNow(), steps = [];
+  const clampEl = v => Math.max(-89.9, Math.min(89.9, v));
+  for (let i = 0; i < n; i++){
+    const t = n > 1 ? i / n : 0;            // a loop: the last frame leads back to the first
+    let c = {...base, pan: base.pan.slice()};
+    if (preset === 'orbit') c.azimuth = base.azimuth + 360 * t;
+    else if (preset === 'rock') c.azimuth = base.azimuth + 30 * Math.sin(2 * Math.PI * t);
+    else if (preset === 'tilt') c.elevation = clampEl(base.elevation + 30 * Math.sin(2 * Math.PI * t));
+    else if (preset === 'zoom') c.zoom = base.zoom * (1 + 1.5 * Math.sin(Math.PI * t));
+    else if (preset === 'keys' && KEYS.length > 1){
+      const u = (n > 1 ? i / (n - 1) : 0) * (KEYS.length - 1);
+      const k = Math.min(Math.floor(u), KEYS.length - 2);
+      c = lerpCamera(KEYS[k], KEYS[k + 1], ease(u - k));
+    }
+    steps.push(c);
+  }
+  if (series){
+    /* Each 4D overlay runs through its frames once over the path. */
+    for (const L of SPEC.layers){
+      if (!L.visible) continue;
+      for (const [index, o] of (L.overlays || []).entries()){
+        const count = await frameCount(o.nifti);
+        if (count <= 1) continue;
+        steps.forEach((st, i) => {
+          st.frames = st.frames || {};
+          (st.frames[L.id] = st.frames[L.id] || {})[index] = Math.floor(i / steps.length * count);
+        });
+      }
+    }
+  }
+  return steps;
+}
+function applyStep(st){
+  SPEC.camera = {azimuth: st.azimuth, elevation: st.elevation, zoom: st.zoom};
+  SPEC.pan = st.pan;
+  for (const [id, entries] of Object.entries(st.frames || {})){
+    const L = SPEC.layers.find(l => l.id === id);
+    if (L) for (const [index, frame] of Object.entries(entries)) L.overlays[index].frame = frame;
+  }
+}
+function animPanel(){
+  let box = $('#anim');
+  if (box){ box.classList.toggle('on'); return; }
+  box = el('div'); box.id = 'anim'; box.className = 'on';
+  box.innerHTML = `
+    <header><strong>Animate</strong><button class="icon" id="a-close">✕</button></header>
+    <div class="sec">Record what the view shows</div>
+    <div class="arow"><button id="a-rec">● Record</button><span class="hint" id="a-rec-n"></span></div>
+    <div class="sec">Camera path</div>
+    <div class="arow"><select id="a-preset">
+      <option value="orbit">Orbit 360°</option><option value="rock">Rock ±30°</option>
+      <option value="tilt">Tilt ±30°</option><option value="zoom">Zoom in and out</option>
+      <option value="keys">Through keyframes</option></select></div>
+    <div class="arow"><button id="a-key">+ Keyframe</button><button id="a-keys-clear">Clear</button>
+      <span class="hint" id="a-keys-n">0 keyframes</span></div>
+    <div class="arow"><label>Seconds</label><input id="a-sec" type="number" value="6" min="1" step="1">
+      <label>FPS</label><input id="a-fps" type="number" value="15" min="2" max="30" step="1"></div>
+    <div class="arow"><label><input id="a-series" type="checkbox"> step 4D series along the path</label></div>
+    <div class="arow"><label>GIF size</label><select id="a-size">
+      <option value="1">view size</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
+      <label><input id="a-hq" type="checkbox"> hi-res</label></div>
+    <div class="arow"><button id="a-preview">Preview</button><button id="a-gif" class="primary">Render GIF…</button></div>`;
+  $('#view').appendChild(box);
+  $('#a-close').onclick = () => box.classList.remove('on');
+  const recN = $('#a-rec-n');
+  $('#a-rec').onclick = () => {
+    if (!RECORDING){
+      RECORDING = []; $('#a-rec').textContent = '■ Stop and save GIF';
+      recN.textContent = 'recording — move the view';
+      const tick = setInterval(() => {
+        if (!RECORDING){ clearInterval(tick); return; }
+        recN.textContent = `${RECORDING.length} frame(s)`;
+      }, 300);
+      return;
+    }
+    const frames = RECORDING; RECORDING = null;
+    $('#a-rec').textContent = '● Record'; recN.textContent = `${frames.length} frame(s)`;
+    if (!frames.length){ status('nothing was recorded', true); return; }
+    chooseFile('save', $('#m-path').value, async p => {
+      if (!/\.gif$/i.test(p)) p += '.gif';
+      const form = new FormData();
+      form.append('path', p);
+      const durations = frames.map((f, i) => i + 1 < frames.length
+                                   ? frames[i + 1].t - f.t : 600);
+      form.append('durations', JSON.stringify(durations));
+      frames.forEach((f, i) => form.append('frames', f.blob, `f${i}.png`));
+      status(`writing ${frames.length} frames …`);
+      try {
+        const r = await fetch('/api/gif', {method: 'POST', body: form});
+        const j = await r.json(); if (!r.ok) throw new Error(j.error);
+        status(`saved ${j.path} (${j.frames} frames)`);
+      } catch (e) { status(e.message, true); }
+    });
+  };
+  const keysN = () => $('#a-keys-n').textContent = `${KEYS.length} keyframe(s)`;
+  $('#a-key').onclick = () => { KEYS.push(cameraNow()); keysN(); $('#a-preset').value = 'keys'; };
+  $('#a-keys-clear').onclick = () => { KEYS = []; keysN(); };
+  const settings = () => {
+    const fps = Math.max(2, Math.min(30, parseFloat($('#a-fps').value) || 15));
+    const n = Math.max(2, Math.round((parseFloat($('#a-sec').value) || 6) * fps));
+    return {fps, n, preset: $('#a-preset').value, series: $('#a-series').checked};
+  };
+  $('#a-preview').onclick = async () => {
+    const btn = $('#a-preview');
+    if (btn.textContent === 'Stop'){ PATH_STOP = true; return; }
+    const {fps, n, preset, series} = settings();
+    if (preset === 'keys' && KEYS.length < 2){ status('set at least two keyframes', true); return; }
+    const before = cameraNow(), steps = await pathSteps(preset, n, series);
+    PATH_STOP = false; btn.textContent = 'Stop';
+    for (const st of steps){
+      if (PATH_STOP) break;
+      const t0 = performance.now();
+      applyStep(st); await renderSettled();
+      const wait = 1000 / fps - (performance.now() - t0);
+      if (wait > 0) await sleep(wait);
+    }
+    btn.textContent = 'Preview';
+    applyStep(before); render();
+  };
+  $('#a-gif').onclick = () => {
+    const {fps, n, preset, series} = settings();
+    if (preset === 'keys' && KEYS.length < 2){ status('set at least two keyframes', true); return; }
+    chooseFile('save', $('#m-path').value, async p => {
+      if (!/\.gif$/i.test(p)) p += '.gif';
+      const scale = parseFloat($('#a-size').value) || 1;
+      const box = stage.getBoundingClientRect();
+      const steps = await pathSteps(preset, n, series);
+      try {
+        await postJSON('/api/animate', {path: p, steps, fps, spec: SPEC,
+          width: Math.round(box.width * scale), height: Math.round(box.height * scale),
+          quality: $('#a-hq').checked ? 'export' : 'preview'});
+        const poll = async () => {
+          const j = await getJSON('/api/animate');
+          if (j.error){ status(j.error, true); return; }
+          if (j.running){ status(`rendering GIF … ${j.done} / ${j.total}`); setTimeout(poll, 700); return; }
+          status(`saved ${j.path}`); render();
+        };
+        poll();
+      } catch (e) { status(e.message, true); }
+    });
+  };
+}
+$('#b-anim').onclick = animPanel;
 
 /* ---------- boot ---------- */
 (async () => {

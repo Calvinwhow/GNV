@@ -16,20 +16,20 @@ import json
 import tempfile
 import webbrowser
 from pathlib import Path
-from threading import Lock, Timer
+from threading import Lock, Thread, Timer
 
 from flask import Flask, jsonify, request, send_from_directory
 
 from .session import RenderSession, catalogue
 from .spec import (
-    new_electrode_layer,
+    new_electrode_layer, new_volume_layer,
     DEFAULT_LIGHTING, SpecError, load_spec, new_fiber_layer, new_mesh_layer,
-    new_overlay, new_slice_layer, new_spec, save_spec,
+    new_overlay, new_slice_layer, new_spec, normalize_spec, save_spec,
 )
 
 STATIC = Path(__file__).resolve().parent / "static"
 MESH_SUFFIXES = {".vtk", ".vtp", ".stl", ".ply", ".obj", ".gii"}
-VOLUME_SUFFIXES = {".nii", ".gz"}
+VOLUME_SUFFIXES = {".nii", ".gz", ".npz"}
 FIBER_SUFFIXES = {".mat", ".npy", ".tck", ".trk", ".json"}
 
 
@@ -81,6 +81,29 @@ def _drop_target(drops, name, item):
     return target
 
 
+def _write_gif(frames, path, fps=None, durations=None):
+    """Frames to an animated GIF that loops. Each frame gets its own 256-colour
+    palette, which keeps a coloured overlay from banding against grey anatomy
+    the way one shared palette would."""
+    if not frames:
+        raise ValueError("no frames to write")
+    path = Path(path).expanduser()
+    if path.suffix.lower() != ".gif":
+        path = path.with_suffix(".gif")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    size = frames[0].size
+    palettised = [f.resize(size) if f.size != size else f for f in frames]
+    palettised = [f.quantize(colors=256, method=2, dither=1) for f in palettised]
+    if durations:
+        duration = [max(int(round(d)), 20) for d in durations][:len(palettised)]
+        duration += [duration[-1] if duration else 66] * (len(palettised) - len(duration))
+    else:
+        duration = max(int(round(1000.0 / float(fps or 15))), 20)
+    palettised[0].save(path, save_all=True, append_images=palettised[1:],
+                       duration=duration, loop=0, disposal=2, optimize=False)
+    return str(path)
+
+
 def create_app(spec=None, drop_dir=None):
     app = Flask(__name__, static_folder=None)
     app.config["DROP_DIR"] = str(drop_dir or Path(tempfile.gettempdir()) /
@@ -118,11 +141,31 @@ def create_app(spec=None, drop_dir=None):
         makers = {"mesh": (new_mesh_layer, "Mesh"),
                   "fibers": (new_fiber_layer, "Fibers"),
                   "slices": (new_slice_layer, "Slices"),
-                  "electrode": (new_electrode_layer, "Electrode")}
+                  "electrode": (new_electrode_layer, "Electrode"),
+                  "volume": (new_volume_layer, "Volume")}
         if kind not in makers:
             return jsonify({"error": f"unknown layer kind {kind!r}"}), 400
         maker, label = makers[kind]
         return jsonify(maker(name=label))
+
+    @app.get("/api/volumes")
+    def api_volumes():
+        """Packaged bodies and prepared backdrops for the volume layer's picker."""
+        from circuit_viewer.volume_render import library
+
+        return jsonify(library())
+
+    @app.post("/api/volumes/levels")
+    def api_volume_levels():
+        """Build a large body's levels as a background job, polled on the same
+        job endpoint as a conversion, so its first render does not stall."""
+        from .backdrop_jobs import start_levels
+
+        body = request.get_json(force=True)
+        try:
+            return jsonify(start_levels(body["source"]))
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
 
     @app.post("/api/upload")
     def api_upload():
@@ -285,7 +328,106 @@ def create_app(spec=None, drop_dir=None):
         warnings = session.warnings
         if warnings:
             headers["X-Render-Warnings"] = json.dumps(warnings)
+        # How big the view is in the world and which way is right / up, so a
+        # drag in the browser pans by exactly the distance the cursor moved.
+        if session.view:
+            headers["X-View"] = json.dumps(session.view)
         return app.response_class(png, mimetype="image/png", headers=headers)
+
+    @app.get("/api/frames")
+    def api_frames():
+        """How many frames a map holds (4D NIfTI, or fibres x time values)."""
+        from .frames import frame_count
+
+        try:
+            return jsonify({"frames": frame_count(request.args["path"])})
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+    # -- animation -----------------------------------------------------------
+    # A camera path (or a series played through) rendered frame by frame into a
+    # GIF, in the background: a few hundred volume renders is minutes, not a
+    # request. One job at a time; progress is polled like a conversion.
+    anim = {"running": False, "done": 0, "total": 0, "path": None,
+            "error": None}
+
+    @app.post("/api/animate")
+    def api_animate():
+        body = request.get_json(force=True)
+        if anim["running"]:
+            return jsonify({"error": "already rendering an animation"}), 400
+        try:
+            steps = list(body["steps"])
+            out = str(Path(body["path"]).expanduser())
+            size = (int(body.get("width", 800)), int(body.get("height", 640)))
+            fps = max(float(body.get("fps", 15)), 1.0)
+            quality = body.get("quality", "preview")
+            base = normalize_spec(body.get("spec") or session.spec)
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+        anim.update(running=True, done=0, total=len(steps), path=out,
+                    error=None)
+
+        def run():
+            import copy
+            import io as _io
+
+            from PIL import Image
+
+            frames = []
+            try:
+                with lock:
+                    saved = session.spec
+                    try:
+                        for step in steps:
+                            spec = copy.deepcopy(base)
+                            if step.get("pan") is not None:
+                                spec["pan"] = step["pan"]
+                            for layer_id, entries in (step.get("frames") or {}).items():
+                                for layer in spec["layers"]:
+                                    if layer["id"] != layer_id:
+                                        continue
+                                    for index, frame in entries.items():
+                                        layer["overlays"][int(index)]["frame"] = int(frame)
+                            session.set_spec(spec)
+                            camera = {k: float(step[k]) for k in
+                                      ("azimuth", "elevation", "zoom") if k in step}
+                            png = session.render(size=size, quality=quality,
+                                                 camera=camera)
+                            frames.append(Image.open(_io.BytesIO(png)).convert("RGB"))
+                            anim["done"] += 1
+                    finally:
+                        session.set_spec(saved)
+                _write_gif(frames, out, fps)
+            except Exception as exc:
+                anim["error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                anim["running"] = False
+
+        Thread(target=run, daemon=True).start()
+        return jsonify(dict(anim))
+
+    @app.get("/api/animate")
+    def api_animate_status():
+        return jsonify(dict(anim))
+
+    @app.post("/api/gif")
+    def api_gif():
+        """Assemble a screen recording -- the frames the browser displayed,
+        with how long each stayed on screen -- into a GIF."""
+        from PIL import Image
+
+        try:
+            out = str(Path(request.form["path"]).expanduser())
+            durations = json.loads(request.form.get("durations") or "[]")
+            files = request.files.getlist("frames")
+            frames = [Image.open(f.stream).convert("RGB") for f in files]
+            if not frames:
+                return jsonify({"error": "nothing was recorded"}), 400
+            _write_gif(frames, out, None, durations)
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+        return jsonify({"path": out, "frames": len(frames)})
 
     @app.post("/api/export")
     def api_export():

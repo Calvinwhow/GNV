@@ -1,3 +1,6 @@
 # Generated backdrop archives and temporary conversion scratch files.
 *.npz
 *.building.raw
+# Volume levels built beside each archive (volume_render.build_levels).
+*.lod*.npy
+*.partial
