@@ -43,7 +43,7 @@ __all__ = [
     "new_overlay", "OVERLAY",
     "normalize_spec", "load_spec", "save_spec", "camera_direction", "VIEW_PRESETS",
     "new_volume_layer", "VOLUME_LAYER",
-    "STATS", "SIGNS", "MODES", "DRAWS", "SPLITS", "FIBER_COLORINGS", "OVERLAY_RENDERS",
+    "STATS", "SIGNS", "MODES", "DRAWS", "SPLITS", "FIBER_COLORINGS",
 ]
 
 SPEC_VERSION = 1
@@ -55,8 +55,6 @@ DRAWS = ("fill", "outline")
 REGION_COLORS = (None, "distinct", "atlas")
 SPLITS = ("auto", "single", "labels", "components", "volumes")
 FIBER_COLORINGS = ("solid", "direction", "value")
-# A body is drawn either by casting rays through it or by painting its skin.
-OVERLAY_RENDERS = ("surface", "volume")
 OPACITY_PROFILES = ("linear", "sigmoid", "geom", "foreground")
 
 # Azimuth is measured in the axial plane from anterior, turning towards the LEFT
@@ -206,6 +204,15 @@ OVERLAY = {
     # bottom colour (MRIcroGL's look); lower lets a LUT's own alpha ramp fade
     # the low end of the scale into the anatomy.
     "override": 1.0,
+    # Volume layers only. X-RAY is a property of the map, not of the brain:
+    # 0 paints this map on the tissue the rays reach (the cortex, a cut face);
+    # above 0 it is seen THROUGH the brain as well, tinting the surface above
+    # it by exp(-depth / xray_mm) -- at this depth a blob tints at 37%. The
+    # brain itself is never made see-through by it; its own opacity does that.
+    "xray_mm": 0.0,
+    # X-rayed maps: the fraction of the colour scale over which a value's
+    # strength rises from the threshold, so a blob's edge does not terrace.
+    "fade": 0.03,
     # Vertex-sampled surfaces only: average each vertex's samples over the
     # surface around it, about this many millimetres along the mesh, before
     # sign and threshold decide anything. A 2 mm map sampled at single points
@@ -264,14 +271,10 @@ VOLUME_LAYER = {
     "opacity": 1.0,            # scales the body's opacity transfer function
     "shade": True,             # gradient shading from the scene's lighting rig
     # -- how overlays colour it ------------------------------------------
-    # surface: paint the tissue the rays reach (cortex and cut faces) -- the
-    #          body keeps its own shape and lighting, only its colour changes.
-    # volume:  x-ray the overlays through an opaque brain: they are faded by
-    #          depth behind its surface, exp(-depth / xray_depth_mm), never hidden.
-    "overlay_render": "surface",
-    "xray_depth_mm": 8.0,      # volume mode: overlay at this depth shows at 37%
-    "overlay_fade": 0.03,      # volume mode: fraction of the colour scale to fade in over
-    "overlay_smooth_vox": 0.75,  # volume mode: Gaussian on each overlay, its voxels
+    # Overlays only ever change the body's colour; its shape, opacity and
+    # lighting stay its own. Whether a map is painted on the surface or x-rayed
+    # through the brain is set on each overlay (``xray_mm``).
+    "overlay_smooth_vox": 0.75,  # x-rayed maps: Gaussian on each overlay, its voxels
     # Overlays are drawn only inside the body unless this is on: a map that
     # runs past the brain would otherwise show as colour in the air around it.
     "overlay_outside": False,
@@ -410,7 +413,7 @@ def normalize_spec(spec):
         seen.add(layer["id"])
 
         if kind in ("mesh", "slices", "fibers", "volume"):
-            layer["overlays"] = _overlays(raw, layer)
+            layer["overlays"] = _overlays(raw, layer, _legacy_xray(raw, kind))
 
         if kind == "electrode":
             layer["hidden_regions"] = [str(r) for r in
@@ -418,16 +421,12 @@ def normalize_spec(spec):
             layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
 
         if kind == "volume":
-            _check(layer["overlay_render"] in OVERLAY_RENDERS,
-                   f"overlay_render must be one of {OVERLAY_RENDERS}")
             _check(layer["opacity_profile"] in OPACITY_PROFILES,
                    f"opacity_profile must be one of {OPACITY_PROFILES}")
             layer["section"] = _section(layer.get("section"))
             layer["source"] = str(layer.get("source") or "") or None
-            layer["xray_depth_mm"] = min(max(float(layer.get("xray_depth_mm") or 8.0), 0.5), 300.0)
             layer["color"] = str(layer["color"]) if layer.get("color") else None
-            for key, top in (("opacity", 1.0), ("overlay_fade", 1.0)):
-                layer[key] = min(max(float(layer[key]), 0.0), top)
+            layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
             layer["overlay_smooth_vox"] = max(float(layer.get("overlay_smooth_vox") or 0.0), 0.0)
             layer["overlay_outside"] = bool(layer.get("overlay_outside"))
 
@@ -483,13 +482,29 @@ def _section(raw):
     return out
 
 
-def _overlays(raw, layer):
+def _legacy_xray(raw, kind):
+    """Overlay defaults for a volume layer saved when x-ray was layer-wide.
+
+    Such a layer carried ``overlay_render: "volume"`` with one depth and one
+    fade for every map on it. Each of its overlays inherits them unless it
+    sets its own, so an old figure renders as it was saved.
+    """
+    if kind != "volume" or raw.get("overlay_render") != "volume":
+        return {}
+    out = {"xray_mm": float(raw.get("xray_depth_mm") or 8.0)}
+    if raw.get("overlay_fade") is not None:
+        out["fade"] = float(raw["overlay_fade"])
+    return out
+
+
+def _overlays(raw, layer, inherited=None):
     """The layer's overlay stack, migrating the older single-volume form.
 
     Figures saved before a layer could hold more than one volume carry `nifti`
     and its colouring at the top level. Reading those as a one-entry stack keeps
     them loadable, which matters because the whole point of the project file is
-    that a figure stays reproducible.
+    that a figure stays reproducible. ``inherited`` are defaults the layer
+    hands down (see ``_legacy_xray``); an overlay's own value wins.
     """
     stack = raw.get("overlays")
     if stack is None and raw.get("nifti"):
@@ -498,7 +513,7 @@ def _overlays(raw, layer):
     out = []
     for entry in stack or []:
         _check(isinstance(entry, dict), "every overlay must be an object")
-        item = dict(OVERLAY, id=entry.get("id") or _new_id())
+        item = dict(OVERLAY, **(inherited or {}), id=entry.get("id") or _new_id())
         item.update({k: v for k, v in entry.items() if k in OVERLAY or k == "id"})
         if not item["nifti"]:
             continue
@@ -513,6 +528,8 @@ def _overlays(raw, layer):
         item["frame"] = max(int(item.get("frame") or 0), 0)
         item["override"] = min(max(float(1.0 if item.get("override") is None
                                          else item["override"]), 0.0), 1.0)
+        item["xray_mm"] = min(max(float(item.get("xray_mm") or 0.0), 0.0), 300.0)
+        item["fade"] = min(max(float(item.get("fade") or 0.0), 0.0), 1.0)
         for key in ("threshold", "max_value", "min_value", "clim"):
             if item.get(key) in ("", []):
                 item[key] = None

@@ -538,6 +538,7 @@ function overlayStack(b, L, set, kind){
     ovr.title = 'how strongly the colour scale overrides the anatomy at its low end';
     ovr.oninput = () => { o.override = parseFloat(ovr.value); set('overlays', stack); };
     field(body, 'Override brain', ovr);
+    if (kind === 'volume') xrayControls(body, o, stack, set);
     card.appendChild(body);
     b.appendChild(card);
   });
@@ -872,35 +873,12 @@ function volumeBody(b, L, set){
   field(b, 'Shade', check(L.shade !== false, v => set('shade', v),
                           'gradient shading from the scene lighting'));
 
-  field(b, 'Overlays', select(
-    [{value:'surface', label:'Paint the tissue the rays reach'},
-     {value:'volume',  label:'X-ray through the brain'}],
-    L.overlay_render || 'surface', v => set('overlay_render', v)));
-  {
-    /* Always shown: they shape x-rayed overlays and are simply unused while
-     * overlays are painted on the surface.
-     * X-ray: the brain is rendered as it always is -- opaque and lit -- and
-     * the overlays are ray-cast through it on their own, each sample dimmed by
-     * how deep behind the brain's surface it sits, exp(-depth / this). At this
-     * depth a blob shows at 37%, at twice it 14%. Small: just under the cortex
-     * (or a cut face). Large: everything the ray crosses. */
-    const depth = el('input'); depth.type='range'; depth.min=0.5; depth.max=60; depth.step=0.5;
-    depth.value = L.xray_depth_mm ?? 8;
-    const shown = el('span','hint', (L.xray_depth_mm ?? 8) + ' mm');
-    depth.oninput = () => { shown.textContent = depth.value + ' mm'; };
-    depth.onchange = () => set('xray_depth_mm', parseFloat(depth.value));
-    const wrap = el('div','grow inline'); wrap.append(depth, shown);
-    b.appendChild(el('div','sec', 'X-ray' +
-      ((L.overlay_render || 'surface') === 'volume' ? '' : ' — used when overlays are x-rayed')));
-    field(b, 'X-ray depth', wrap);
-    const fade = el('input'); fade.type='range'; fade.min=0; fade.max=1; fade.step=0.05;
-    fade.value = L.overlay_fade ?? 0.03;
-    fade.title = 'how much of each scale an overlay fades in over, from its threshold';
-    fade.oninput = () => set('overlay_fade', parseFloat(fade.value));
-    field(b, 'Fade in', fade);
-    field(b, 'Smooth (vox)', number(L.overlay_smooth_vox ?? 0.75,
-          v => set('overlay_smooth_vox', v ?? 0), {step: 0.25, placeholder: '0'}));
-  }
+  /* X-ray is set on each overlay (its card, below): it decides how a MAP is
+   * seen, and never makes the brain itself see-through -- the opacity above
+   * does that. This one setting is the layer's because it is baked into the
+   * voxels every x-rayed map shares. */
+  field(b, 'X-ray smooth (vox)', number(L.overlay_smooth_vox ?? 0.75,
+        v => set('overlay_smooth_vox', v ?? 0), {step: 0.25, placeholder: '0'}));
 
   /* Overlays stay inside the body unless asked otherwise: a map that runs past
    * the brain would otherwise hang as colour in the air around it. */
@@ -909,16 +887,12 @@ function volumeBody(b, L, set){
         'draw overlay values that fall outside the body as well'));
 
   sectionEditor(b, L, set);
-  b.appendChild(el('div','hint', (L.overlay_render || 'surface') === 'volume'
-    ? 'Overlays are ray-cast through the brain, which stays opaque and lit. ' +
-      'Each overlay sample is dimmed by its depth behind the brain\'s surface ' +
-      '(or a cut face), so shallow colour is bright and deep colour faint but ' +
-      'never hidden. Use a section to bring anything deep to the surface. ' +
-      'Fade-in keeps a blob\'s edge from terracing; smoothing rounds the voxel ' +
-      'staircase a masked map has at its edge — set it to 0 to turn it off.'
-    : 'The body keeps its own shape and lighting; overlays change only its ' +
-      'colour, on the cortex and on every cut face. Cuts are clipping planes ' +
-      'with a solid face, so a cut through white matter reads as a flat section.'));
+  b.appendChild(el('div','hint',
+    'The body keeps its own shape, opacity and lighting; overlays change only ' +
+    'its colour, on the cortex and on every cut face. An x-rayed overlay also ' +
+    'tints the surface above whatever it has deeper down, fainter the deeper ' +
+    'it lies. Cuts are clipping planes with a solid face. X-ray smoothing ' +
+    'rounds the voxel staircase at a masked map\'s edge; 0 turns it off.'));
   overlayStack(b, L, set, 'volume');
 }
 
@@ -1103,14 +1077,41 @@ function fiberBody(b, L, set){
     'survives, for speed.'));
 }
 
+/* X-ray belongs to the map. Off, the map paints the tissue the rays reach;
+ * on, it is also seen through the brain, tinting the surface above it by
+ * exp(-depth / this): at this depth a blob tints at 37%, at twice it 14%. The
+ * brain's own look -- crisp, lit, opaque -- is untouched either way. */
+const XRAY_DEFAULT_MM = 8;
+
+function xrayControls(body, o, stack, set){
+  const on = (o.xray_mm || 0) > 0;
+  body.appendChild(el('div','sec','X-ray — see this map through the brain'));
+  field(body, 'X-ray', check(on, v => {
+    o.xray_mm = v ? XRAY_DEFAULT_MM : 0;
+    set('overlays', stack); drawLayers();
+  }, 'show what this map has below the surface, faded by depth'));
+  if (!on) return;
+  const depth = el('input'); depth.type='range'; depth.min=0.5; depth.max=60; depth.step=0.5;
+  depth.value = o.xray_mm;
+  const shown = el('span','hint', o.xray_mm + ' mm');
+  depth.oninput = () => { shown.textContent = depth.value + ' mm'; };
+  depth.onchange = () => { o.xray_mm = parseFloat(depth.value);
+                           set('overlays', stack); };
+  const wrap = el('div','grow inline'); wrap.append(depth, shown);
+  field(body, 'Depth', wrap);
+  const fade = el('input'); fade.type='range'; fade.min=0; fade.max=1; fade.step=0.05;
+  fade.value = o.fade ?? 0.03;
+  fade.title = 'how much of the colour scale a value fades in over, from its threshold';
+  fade.oninput = () => { o.fade = parseFloat(fade.value); set('overlays', stack); };
+  field(body, 'Fade in', fade);
+}
+
 /* Enough to close the speckle without smearing a map across the cortex. */
 const FILL_PASSES = 3;
 
 /* Fields that change which controls a panel shows, so editing them rebuilds
- * it: a volume's body (its size hints and levels button) and how its overlays
- * are drawn (the x-ray heading). */
-const RESTRUCTURE = new Set(['coloring', 'mesh', 'backdrop', 'source',
-                             'overlay_render']);
+ * it: a volume's body (its size hints and levels button). */
+const RESTRUCTURE = new Set(['coloring', 'mesh', 'backdrop', 'source']);
 
 const LIGHT_CONTROLS = [
   ['key_azimuth',    'Key azimuth',   -180, 180, 1],

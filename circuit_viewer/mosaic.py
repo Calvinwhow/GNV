@@ -25,7 +25,7 @@ setting can be reached from here:
 * The common ones are named keyword arguments with the defaults listed in
   ``DEFAULTS`` below, per mode.
 * Anything else is accepted by its viewer name and routed to the overlay, the
-  layer or the scene, e.g. ``hide_below_min=True``, ``overlay_fade=0.3``,
+  layer or the scene, e.g. ``hide_below_min=True``, ``fade=0.3``,
   ``opacity_profile="sigmoid"``, ``lighting={"key_azimuth": 60}``. Names that
   mean different things on the overlay and the layer (``opacity``, ``color``,
   ``clim``, ``sign``, ``step``) always mean the OVERLAY; reach the layer's with
@@ -70,14 +70,10 @@ VIEWS = {
 DEFAULT_LAYOUT = [["left_lateral", "right_lateral", "inferior"],
                   ["left_medial", "right_medial", "superior"]]
 
-# How a body shows its overlay. "depth" and "xray" x-ray the map through an
-# opaque brain, faded over that many millimetres below the surface; "surface"
-# paints only the tissue the rays reach.
-VOLUME_RENDERS = {
-    "surface": {"overlay_render": "surface"},
-    "depth":   {"overlay_render": "volume", "xray_depth_mm": 5.0},
-    "xray":    {"overlay_render": "volume", "xray_depth_mm": 25.0},
-}
+# How a body shows its overlay: the map's x-ray depth (its ``xray_mm``).
+# "depth" and "xray" see the map through the brain, tinting the surface by
+# exp(-depth / mm); "surface" paints only the tissue the rays reach.
+VOLUME_RENDERS = {"surface": 0.0, "depth": 5.0, "xray": 25.0}
 
 # Every named argument and its default. Shared ones apply to every mode; the
 # per-mode blocks only to their mode. Anything not here is still reachable by
@@ -279,6 +275,11 @@ def _overlays(source, opts, overlay_fields):
                 max_value=opts["max_value"], clim=opts["clim"],
                 opacity=opts["opacity"], bar=False,
                 name=opts["label"] or _label(source))
+    if "render" in opts:        # a body: how it shows the map
+        depth = VOLUME_RENDERS[opts["render"]]
+        if depth and opts["depth_mm"] is not None:
+            depth = float(opts["depth_mm"])
+        base["xray_mm"] = depth
     base.update(overlay_fields)
     two_tailed = (base["sign"] == "both" and not base["absolute"]
                   and (base["threshold"] is not None
@@ -406,13 +407,10 @@ def _layers(mode, ovs, opts, keep):
 
     cut = _midline_cut(keep)
     if mode == "volume":
-        render = dict(VOLUME_RENDERS[opts["render"]])
-        if opts["depth_mm"] is not None:
-            render["xray_depth_mm"] = float(opts["depth_mm"])
         body = S.new_volume_layer(source=opts["body"], color=opts["tint"],
                                   clim=opts["body_threshold"], section=cut,
                                   overlay_outside=bool(opts["allow_outside"]),
-                                  overlays=ovs, **render)
+                                  overlays=ovs)
         return [body]
     if mode == "mesh":
         for ov in ovs:

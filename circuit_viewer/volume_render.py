@@ -16,26 +16,29 @@ like tissue rather than voxels. Pre-baking colours per voxel and letting VTK
 sample them with its default nearest-neighbour lookup -- what this module used
 to do -- is what made a template render as a flat, blocky blob.
 
-OVERLAYS colour the body in one of two ways, chosen by ``overlay_render``:
+OVERLAYS only ever change the body's COLOUR. Its opacity, shape and lighting
+are its own in every mode, so a map can never make the brain look see-through
+or soft; the body's own opacity is what does that. How a map colours it is set
+per overlay, by ``xray_mm``:
 
-``surface``  paint the overlay onto whatever tissue the rays reach. The body's
-             scalars still decide opacity and shading, so the brain looks
-             exactly as it does with no overlay; only its colour changes, and
-             it changes on the cortex and on every cut face alike. This is the
-             MRIcroGL default, and the one a figure usually wants.
+``0``        paint the map onto whatever tissue the rays reach. The body's
+             scalars still decide opacity and shading; only its colour
+             changes, on the cortex and on every cut face alike. This is the
+             MRIcroGL default, and the one a figure usually wants. With every
+             overlay at 0 the layer bakes colours per voxel (``surface``).
 
-``volume``   x-ray the overlays through an opaque brain. The ray caster keeps
-             two accumulators instead of one: the brain composites exactly as
-             it does on its own -- opaque, crisp, identically lit -- while the
-             overlays composite separately, unoccluded by it but faded by how
-             far behind the brain's surface each sample lies,
-             ``exp(-depth / xray_depth_mm)``. The overlay is then laid over the
-             brain. Rays keep marching past the opaque surface for as long as an
-             overlay could still show. A small depth shows what sits just under
-             the cortex; a large one shows deep structures in place, inside an
-             intact brain. This is importance-driven compositing, done in the
-             mapper's own shader, so it works with cuts, lighting and the rest
-             of the scene unchanged.
+``> 0``      x-ray the map through the brain. The ray caster composites the
+             brain exactly as it does on its own, and gathers the maps along
+             the rest of the ray in a second accumulator, each sample weighted
+             by how far behind the brain's surface it lies,
+             ``exp(-depth / xray_mm)``. What that accumulator gathers TINTS the
+             brain's surface: the lit brain's diffuse light is recoloured by
+             it, so gyri, shading and cut faces stay exactly as crisp as they
+             are with no overlay, and a deep blob shows as colour on the cortex
+             above it, fainter the deeper it is. Rays keep marching past the
+             opaque surface for as long as a map could still show. Any x-rayed
+             overlay puts the layer in this mode (``volume``); overlays at 0 in
+             it are gathered over a sliver under the surface, i.e. painted.
 
 Both colour through the shared overlay suite -- ``overlay_colours``,
 ``scale_for``, ``composite`` and ``_select`` -- so sign, threshold, max value,
@@ -74,13 +77,11 @@ from pathlib import Path
 import numpy as np
 
 __all__ = [
-    "OVERLAY_RENDERS", "OPACITY_PROFILES", "LIBRARY", "library",
+    "OPACITY_PROFILES", "LIBRARY", "library",
     "resolve_source", "source_shape", "levels", "level_for", "load_grid",
     "body_window", "build_actor", "PREVIEW_VOXELS", "EXPORT_VOXELS",
     "native_values", "pinned", "body_mask", "body_weight",
 ]
-
-OVERLAY_RENDERS = ("surface", "volume")
 
 # Closed set of transfer-function shapes, so a spec round-trips.
 #   linear      opacity rises with value: density reads as density.
@@ -654,11 +655,12 @@ def body_weight(grid):
     user-set one, so the extent is a property of the body and restyling the
     body's contrast never moves it.
 
-    The edge is SOFT -- the binary envelope blurred over about a millimetre --
-    and overlays are multiplied by it. A hard voxel mask cut every overlay
-    along a voxel staircase, and an opaque overlay drew that staircase as a
-    terraced shell just outside the cortex. Built on a coarse copy of a large
-    level and interpolated back, so a hi-res level costs about as little as a
+    The envelope is blurred over about a millimetre, and ``body_mask`` is its
+    half-way level, so the mask's edge is smooth rather than a coarse voxel
+    staircase. Overlays are cut at that edge with their values untouched:
+    scaling them down across it left a shell of low values -- the scale's
+    bottom colour -- around the brain. Built on a coarse copy of a large level
+    and interpolated back, so a hi-res level costs about as little as a
     preview.
     """
     from scipy import ndimage
@@ -1169,7 +1171,7 @@ _SURFACE_BAKED = ("clim", "cmap", "color")
 # repaint a hundred million voxels.
 _NOT_PAINTED = ("id", "name", "bar", "draw", "outline_width", "outline_smooth",
                 "fill_gaps", "smooth_mm", "mode", "stat", "min_value",
-                "keep_top", "step")
+                "keep_top", "step", "xray_mm", "fade")
 _data = OrderedDict()           # data key -> _Data
 _DATA_CACHE = 3
 _DATA_BYTES = 3 << 29           # 1.5 GB of GPU-ready voxels
@@ -1187,11 +1189,20 @@ class _Data:
         return int(np.asarray(self.grid.point_data[self.array]).nbytes)
 
 
+# An overlay that is painted (``xray_mm`` 0) inside an x-rayed layer is gathered
+# over this much tissue under the surface: the sliver the surface paint means.
+_PAINT_DEPTH_MM = 0.5
+
+
 def _mode(layer, overlays):
+    """``plain``, ``surface`` (every map painted) or ``volume`` (any x-rayed)."""
     if not overlays:
         return "plain"
-    return "volume" if layer.get("overlay_render", "surface") == "volume" \
-        else "surface"
+    return "volume" if any(_xray_mm(o) > 0 for o in overlays) else "surface"
+
+
+def _xray_mm(overlay):
+    return float(overlay.get("xray_mm") or 0.0)
 
 
 def _data_key(grid, layer, overlays, mode):
@@ -1256,7 +1267,8 @@ def build_actor(grid, layer, overlays, material, reuse=None):
     _clip(actor.GetMapper(), prop, layer.get("section"),
           0.0 if mode == "surface" else data.outside)
     if mode == "volume":
-        _install_xray(actor, float(layer.get("xray_depth_mm") or 8.0))
+        _install_xray(actor, [_xray_mm(o) or _PAINT_DEPTH_MM for o in overlays],
+                      outside=bool(layer.get("overlay_outside")))
     else:
         actor.GetShaderProperty().ClearAllFragmentShaderReplacements()
     scales = [(_native(o), o) for o in overlays]
@@ -1307,8 +1319,8 @@ def _style(data, layer, overlays, material):
     # each overlay's built from its own values on the grid.
     body_ctf, body_otf, _ = _body_tfs(data.body, layer)
     tfs = [(body_ctf, body_otf)]
-    fade = float(layer.get("overlay_fade", 0.03) or 0.0)
     for overlay, span, mapping in zip(overlays, data.spans, data.mappings):
+        fade = float(overlay.get("fade", 0.03) or 0.0)
         tfs.append(_overlay_tfs(span, _native(overlay), overlay, fade, mapping))
     prop.IndependentComponentsOn()
     for index, (ctf, otf) in enumerate(tfs):
@@ -1420,17 +1432,16 @@ def _raycast_data(grid, values, layer, overlays, outside):
                        np.uint8 if eight else np.float32)
     stacked[:, 0] = values
     spans, mappings = [], []
-    weight = None
-    if not layer.get("overlay_outside"):
-        # Exactly zero outside the envelope (the far tail of the blur must not
-        # leave faint values in the air), full inside, a smooth ramp between.
-        weight = np.clip((body_weight(grid) - 0.25) / 0.5, 0.0, 1.0)
+    inside = None if layer.get("overlay_outside") else body_mask(grid)
     for index, overlay in enumerate(overlays, start=1):
         raw = _on_grid(grid, overlay["nifti"], smooth_vox=smooth)
-        if weight is not None:
-            # Faded to zero across the body's soft edge, so a blob that runs
-            # past the brain ends in a smooth surface rather than a voxel cut.
-            raw = raw * weight
+        if inside is not None:
+            # Cut at the body's envelope, values untouched inside it. The
+            # envelope is dilated past the tissue and the shader gathers maps
+            # only once a ray is in tissue, so this edge is never drawn. Fading
+            # values to zero across the edge instead left a shell of low values
+            # -- the bottom colour -- around the brain, which the ray met first.
+            raw = np.where(inside, raw, 0.0).astype(raw.dtype, copy=False)
         else:
             raw = raw.copy()
         # The transfer functions leave a narrow band around zero undrawn (see
@@ -1455,52 +1466,71 @@ def _raycast_data(grid, values, layer, overlays, outside):
 
 # -- x-ray compositing ------------------------------------------------------
 # Replacements for the GPU ray caster's fragment shader (VTK 9.7 hook names).
-# Component 0 is the brain, 1.. are overlays. Only the compositing and the
-# termination test change; sampling, transfer-function lookup, lighting and
-# clipping are VTK's own functions, called exactly as VTK calls them.
+# Component 0 is the brain, 1.. are overlays. Sampling, transfer-function
+# lookup, lighting and clipping are VTK's own functions, called as VTK calls
+# them; only the compositing and the termination test change.
+#
+# The brain composites front to back exactly as VTK would. Its lighting is
+# linear in its colour -- ambient and specular added, diffuse multiplied -- so
+# alongside it the two parts are accumulated with the same weights: what the
+# brain's light would be in black (ambient + specular) and in white (adding the
+# diffuse). At the end the overlays' gathered colour replaces the brain's own
+# colour in that sum, by as much as the overlays gathered, so a recoloured
+# surface is lit exactly as the brain under it. Opacity is the brain's alone.
 _XR_DECL = """//VTK::Base::Dec
 float xr_surfaceT;
 vec4 xr_overlay;
-#define XR_DEPTH %(depth)s
+vec3 xr_dark;
+vec3 xr_diffuse;
+#define XR_DEPTH_MAX %(depth_max)s
+// Maps are gathered only once the ray is in tissue, unless they may show
+// outside the body.
+#define XR_GATHER (%(gather)s)
 """
 _XR_INIT = """//VTK::DepthPeeling::Ray::Init
   xr_surfaceT = -1.0;
   xr_overlay = vec4(0.0);
+  xr_dark = vec3(0.0);
+  xr_diffuse = vec3(0.0);
 """
 _XR_SHADE = """
     if (!g_skip)
       {
       vec4 scalar = texture3D(in_volume[0], g_dataPos);
       scalar = scalar * in_volume_scale[0] + in_volume_bias[0];
-      // The brain, composited exactly as VTK composites it.
       if (g_fragColor.a <= g_opacityThreshold)
         {
-        vec4 body = vec4(0.0);
-        body.a = computeOpacity(scalar, 0);
-        if (body.a > 0.0)
+        float xr_a = computeOpacity(scalar, 0);
+        if (xr_a > 0.0)
           {
-          body = computeColor(scalar, body.a, 0);
-          body.rgb *= body.a;
-          g_fragColor = (1.0 - g_fragColor.a) * body + g_fragColor;
+          vec3 xr_albedo = texture2D(in_colorTransferFunc_0[0],
+                                     vec2(scalar[0], 0.0)).xyz;
+          vec3 xr_k = computeLighting(vec4(vec3(0.0), xr_a), 0, 0.0).rgb;
+          vec3 xr_d = computeLighting(vec4(vec3(1.0), xr_a), 0, 0.0).rgb - xr_k;
+          float xr_w = (1.0 - g_fragColor.a) * xr_a;
+          g_fragColor.rgb += xr_w * clamp(xr_k + xr_d * xr_albedo, 0.0, 1.0);
+          g_fragColor.a += xr_w;
+          xr_dark += xr_w * xr_k;
+          xr_diffuse += xr_w * xr_d;
           }
         }
       // Depth into tissue, counted from where the brain turns half opaque.
       if (xr_surfaceT < 0.0 && g_fragColor.a > 0.5) xr_surfaceT = g_currentT;
       float xr_behind = xr_surfaceT < 0.0 ? 0.0
                         : (g_currentT - xr_surfaceT) * in_sampleDistance;
-      float xr_reach = exp(-xr_behind / XR_DEPTH);
-      // Overlays: their own accumulator, faded by depth, not hidden by the brain.
-      for (int i = 1; i < in_noOfComponents; ++i)
+%(overlays)s
+      }
+"""
+# One block per overlay, with its index and depth written in: GLSL 1.50 only
+# indexes a sampler array with a constant.
+_XR_OVERLAY = """      {
+      float xr_oa = computeOpacity(scalar, %(i)d);
+      if (xr_oa > 0.0 && XR_GATHER)
         {
-        vec4 ov = vec4(0.0);
-        ov.a = computeOpacity(scalar, i);
-        if (ov.a > 0.0)
-          {
-          ov = computeColor(scalar, ov.a, i);
-          ov.a *= xr_reach;
-          ov.rgb *= ov.a;
-          xr_overlay = (1.0 - xr_overlay.a) * ov + xr_overlay;
-          }
+        xr_oa *= exp(-xr_behind / %(depth)s);
+        vec3 xr_oc = texture2D(in_colorTransferFunc_0[%(i)d],
+                               vec2(scalar[%(i)d], 0.0)).xyz;
+        xr_overlay += (1.0 - xr_overlay.a) * vec4(xr_oc * xr_oa, xr_oa);
         }
       }
 """
@@ -1510,12 +1540,12 @@ _XR_TERMINATE = """
       {
       break;
       }
-    // Keep marching past an opaque brain while an overlay could still show:
-    // stop once the overlay is saturated, or once the ray is so deep that
-    // exp(-depth / XR_DEPTH) has fallen below 1%.
-    if (xr_overlay.a > g_opacityThreshold ||
+    // Keep marching past an opaque brain while a map could still tint it:
+    // stop once both are saturated, or once the ray is so deep that
+    // exp(-depth / depth) has fallen below 1% for the deepest-reaching map.
+    if ((xr_overlay.a > g_opacityThreshold && g_fragColor.a > g_opacityThreshold) ||
         (g_fragColor.a > g_opacityThreshold && xr_surfaceT >= 0.0 &&
-         (g_currentT - xr_surfaceT) * in_sampleDistance > 4.6 * XR_DEPTH) ||
+         (g_currentT - xr_surfaceT) * in_sampleDistance > 4.6 * XR_DEPTH_MAX) ||
         g_currentT >= g_terminatePointMax)
       {
       break;
@@ -1523,18 +1553,37 @@ _XR_TERMINATE = """
     ++g_currentT;
 """
 _XR_EXIT = """//VTK::Shading::Exit
-  g_fragColor = xr_overlay + (1.0 - xr_overlay.a) * g_fragColor;
+  {
+  float xr_oa = xr_overlay.a;
+  vec3 xr_oc = xr_oa > 1e-6 ? xr_overlay.rgb / xr_oa : vec3(0.0);
+  float xr_a = g_fragColor.a;
+  // The brain, its colour replaced by the maps' as far as they gathered...
+  vec3 xr_rgb = g_fragColor.rgb
+                + xr_oa * (xr_dark + xr_diffuse * xr_oc - g_fragColor.rgb);
+  // ...and, where the brain lets light through, the maps seen directly.
+  xr_rgb += (1.0 - xr_a) * xr_overlay.rgb;
+  g_fragColor = vec4(clamp(xr_rgb, 0.0, 1.0), xr_a + (1.0 - xr_a) * xr_oa);
+  }
 """
 
 
-def _install_xray(actor, depth_mm):
-    """Swap the ray caster's compositing for the two-accumulator x-ray."""
+def _install_xray(actor, depths_mm, outside=False):
+    """Swap the ray caster's compositing for the x-ray tint.
+
+    ``depths_mm`` is one depth per overlay component, in order; ``outside``
+    lets maps show where the body has no tissue.
+    """
+    depths = [max(float(d), 0.05) for d in depths_mm] or [_PAINT_DEPTH_MM]
+    blocks = "".join(_XR_OVERLAY % {"i": i, "depth": "%.6f" % d}
+                     for i, d in enumerate(depths, start=1))
     shader = actor.GetShaderProperty()
     shader.ClearAllFragmentShaderReplacements()
     for tag, code in (
-            ("//VTK::Base::Dec", _XR_DECL % {"depth": "%.6f" % max(depth_mm, 0.05)}),
+            ("//VTK::Base::Dec", _XR_DECL % {
+                "depth_max": "%.6f" % max(depths),
+                "gather": "true" if outside else "g_fragColor.a > 0.0"}),
             ("//VTK::DepthPeeling::Ray::Init", _XR_INIT),
-            ("//VTK::Shading::Impl", _XR_SHADE),
+            ("//VTK::Shading::Impl", _XR_SHADE % {"overlays": blocks}),
             ("//VTK::Terminate::Impl", _XR_TERMINATE),
             ("//VTK::Shading::Exit", _XR_EXIT)):
         shader.AddFragmentShaderReplacement(tag, True, code, False)
