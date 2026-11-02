@@ -80,7 +80,8 @@ __all__ = [
     "OPACITY_PROFILES", "LIBRARY", "library",
     "resolve_source", "source_shape", "levels", "level_for", "load_grid",
     "body_window", "build_actor", "PREVIEW_VOXELS", "EXPORT_VOXELS",
-    "native_values", "pinned", "body_mask", "body_weight",
+    "native_values", "pinned", "body_mask", "body_weight", "tissue_bounds",
+    "atlas_labels",
 ]
 
 # Closed set of transfer-function shapes, so a spec round-trips.
@@ -282,7 +283,7 @@ def opacity_curve(profile):
 
 
 # -- geometry ---------------------------------------------------------------
-def load_grid(source, factor=1):
+def load_grid(source, factor=1, smooth_vox=0.0, labels=None):
     """A body as a world-millimetre ``pv.ImageData`` with ``values`` scalars.
 
     ``factor`` > 1 draws a block-averaged level (see ``levels``). A backdrop's
@@ -292,8 +293,22 @@ def load_grid(source, factor=1):
     permutes or flips axes is relabelled to the matching axis order -- lossless,
     no resampling -- which keeps the body in the same world millimetres as every
     mesh and slice in the scene, and lets ``x = -3`` mean one plane everywhere.
+
+    ``smooth_vox`` is a Gaussian on the body, in the SOURCE's voxels. A
+    template needs none; a label or segmentation map -- a CAT12 p0, a FreeSurfer
+    aseg -- is a staircase of classes whose surface renders as crinkled
+    partial-volume noise, and a voxel of smoothing turns it back into cortex.
+
+    ``labels`` draws only those regions of a label atlas -- the left dentate
+    of SUIT, say -- as a 0/1 body, chosen before anything is averaged so a
+    level's edge is a true partial volume. Needs the atlas NIfTI itself: a
+    prepared backdrop has already blended neighbouring labels together.
     """
     factor = max(int(factor or 1), 1)
+    labels = [int(v) for v in (labels or [])]
+    if labels and _is_backdrop(source):
+        raise ValueError("atlas regions need the label NIfTI itself, not a "
+                         "prepared body (its labels are averaged together)")
     if _is_backdrop(source):
         data, affine = _backdrop_level(source, factor)
     else:
@@ -301,41 +316,65 @@ def load_grid(source, factor=1):
 
         data, affine = _volume(source)
         data = np.asarray(data, np.float32)
+        if labels:
+            data = np.isin(np.rint(data), labels).astype(np.float32)
+            if not data.any():
+                raise ValueError(f"no voxels carry label(s) {labels}")
         if factor > 1:
             data, affine = _block_mean(data, affine, factor, np.float32)
+    sigma = float(smooth_vox or 0.0) / factor
+    if sigma >= 0.2:
+        from scipy.ndimage import gaussian_filter
+
+        smoothed = gaussian_filter(np.asarray(data, np.float32), sigma)
+        data = (np.clip(np.rint(smoothed), 0, 255).astype(np.uint8)
+                if data.dtype == np.uint8 else smoothed)
     return _grid_from(data, affine)
 
 
+# Rotation below this (about 0.06 degrees) is treated as none: template
+# affines carry float noise, and an exactly axis-aligned grid keeps the fast,
+# separable overlay resampling.
+_OBLIQUE_TOL = 1e-3
+
+
 def _grid_from(data, affine):
+    """``data`` on ``affine`` as an ``ImageData`` in world millimetres, lossless.
+
+    The voxel axes are first permuted and flipped to the nearest RAS order --
+    a relabelling, no resampling -- so ``x = -3`` means one plane in every
+    layer. Whatever rotation is left is an OBLIQUE acquisition: a native-space
+    scan whose voxel grid is tilted in the scanner's world. It is kept as the
+    grid's direction matrix, which the ray caster honours, so a patient's own
+    T1 is drawn upright in world space at its own resolution, and anything
+    registered to it -- same grid or not -- lands where it belongs. (Dropping
+    the rotation, as this used to, drew the brain tilted and squashed while
+    its overlays, resampled through the true affine, sat somewhere else.)
+    """
     import pyvista as pv
+    from nibabel.orientations import apply_orientation, inv_ornt_aff, io_orientation
 
     affine = np.asarray(affine, float)
-    direction = affine[:3, :3]
-    order = np.argmax(np.abs(direction), axis=0)
-    if sorted(order.tolist()) != [0, 1, 2]:
-        raise ValueError(
-            "this volume's affine is too oblique to render as a body; "
-            "resample it to an axis-aligned grid first"
-        )
-    signs = np.sign(direction[order, range(3)])
-    signs[signs == 0] = 1.0
-    back = np.argsort(order)
-    data = np.transpose(data, back)
-    spacing = np.abs(direction[order, range(3)])[back]
-    flips = signs[back]
-    corner = affine[:3, 3].astype(float).copy()
-    for axis in range(3):
-        if flips[axis] < 0:
-            data = np.flip(data, axis=axis)
-            corner[axis] -= spacing[axis] * (data.shape[axis] - 1)
-
+    ornt = io_orientation(affine)
+    affine = affine @ inv_ornt_aff(ornt, data.shape[:3])
+    data = apply_orientation(data, ornt)
+    axes = affine[:3, :3]
+    spacing = np.linalg.norm(axes, axis=0)
+    direction = axes / spacing
     grid = pv.ImageData(dimensions=tuple(int(n) for n in data.shape),
                         spacing=tuple(float(s) for s in spacing),
-                        origin=tuple(float(c) for c in corner))
+                        origin=tuple(float(c) for c in affine[:3, 3]))
+    if np.abs(direction - np.eye(3)).max() > _OBLIQUE_TOL:
+        grid.direction_matrix = direction
     dtype = np.uint8 if data.dtype == np.uint8 else np.float32
     grid.point_data["values"] = np.ascontiguousarray(
         data, dtype=dtype).ravel(order="F")
     return grid
+
+
+def _direction(grid):
+    """The grid's voxel-to-world rotation (identity when axis-aligned)."""
+    return np.asarray(grid.direction_matrix, float)
 
 
 # -- levels -----------------------------------------------------------------
@@ -507,12 +546,10 @@ def _buffer_key(values):
 def body_window(values, clim=None):
     """The body's ``(start, saturate)`` window.
 
-    Given, it is used as is. Otherwise it is read off the nonzero voxels: the
-    40th percentile to the 99th. On a T1 that starts the opacity ramp above CSF
-    and partial-volume fuzz, so gyri render as surfaces instead of fog; the top
-    percentile keeps a few bright voxels from compressing the whole range. A
-    mask, where every nonzero voxel is the same, falls back to zero..max.
-    Remembered per array, because every restyle of a body asks again.
+    Given, it is used as is. Otherwise it is read off the nonzero voxels (see
+    ``_auto_window``): the lower three-class Otsu split to the 99th
+    percentile. Remembered per array, because every restyle of a body asks
+    again.
     """
     if clim and len(clim) == 2 and clim[0] is not None and clim[1] is not None \
             and float(clim[0]) != float(clim[1]):
@@ -612,6 +649,7 @@ def _stamp(path):
 def _grid_key(grid):
     return (tuple(grid.dimensions), tuple(np.round(grid.spacing, 9)),
             tuple(np.round(grid.origin, 9)),
+            tuple(np.round(_direction(grid), 9).ravel()),
             _buffer_key(grid.point_data["values"]))
 
 
@@ -698,6 +736,181 @@ def body_weight(grid):
     return _remember(_masks, key, weight, 2)
 
 
+_label_lists = {}               # (atlas, lut, mtimes) -> atlas_labels() result
+_LUT_SUFFIXES = (".lut", ".txt", ".tsv", ".csv")
+
+
+def atlas_labels(source, lut=None):
+    """The regions of a label atlas: ``{"labels": [{"value", "name"}], "table"}``.
+
+    A volume counts as an atlas when every voxel is a whole number and there
+    are between 2 and 2000 distinct nonzero ones; otherwise ``labels`` is
+    empty. Names come from a lookup table (``_lut_names``): ``lut`` when one is
+    given, else one found beside the atlas. ``table`` is the file the names
+    came from, or None, so the panel can say which -- or how to add one.
+    """
+    empty = {"labels": [], "table": None}
+    path = str(Path(resolve_source(source)).expanduser())
+    if _is_backdrop(path) or not os.path.isfile(path):
+        return empty
+    lut = str(Path(lut).expanduser()) if lut else None
+    # The folder's mtime too: a table added after the atlas renames its regions.
+    key = (path, _stamp(path), _stamp(str(Path(path).parent)), lut,
+           _stamp(lut) if lut else 0.0)
+    if key in _label_lists:
+        return _label_lists[key]
+    import nibabel as nib
+
+    out = empty
+    try:
+        data = np.asarray(nib.load(path).dataobj)
+        if data.ndim > 3:
+            data = data[..., 0]
+        sample = data.ravel()[::max(1, data.size // 2_000_000)]
+        if np.all(np.isfinite(sample)) and np.all(sample == np.rint(sample)):
+            values = np.unique(np.rint(data[np.isfinite(data)]).astype(np.int64))
+            values = values[values != 0]
+            if 2 <= values.size <= 2000:
+                names, table = _lut_names(path, lut)
+                out = {"labels": [{"value": int(v), "name": names.get(int(v), "")}
+                                  for v in values],
+                       "table": table}
+    except Exception:
+        out = empty
+    _label_lists[key] = out
+    return out
+
+
+def _bare(name):
+    """A file name without its NIfTI or table extension, lower case."""
+    low = name.lower()
+    for suffix in (".nii.gz", ".nii") + _LUT_SUFFIXES:
+        if low.endswith(suffix):
+            return low[: -len(suffix)]
+    return low
+
+
+def _table_matches(table, atlas):
+    """Whether lookup table ``table`` names atlas ``atlas`` (both file names).
+
+    Same base name, or one is the other plus a separator and more: SUIT's
+    ``atl-Anatom.lut`` for ``atl-Anatom_space-MNI_dseg.nii``, FreeSurfer-style
+    ``aseg_LUT.txt`` for ``aseg.nii.gz``. A short or partial prefix -- ``b.txt``
+    for ``b_atlas.nii``, ``atl.lut`` for ``atlas.nii`` -- does not count.
+    """
+    t, a = _bare(table), _bare(atlas)
+    if len(t) < 3 or len(a) < 3:
+        return t == a
+    if t == a:
+        return True
+    long_, short = (a, t) if len(a) > len(t) else (t, a)
+    return long_.startswith(short) and long_[len(short)] in "_-. "
+
+
+def _parse_table(text):
+    """``{id: name}`` from a lookup table's text.
+
+    One region per line: an integer id first, then the name -- the first run of
+    words that are not numbers -- wherever it sits. That reads SUIT's
+    ``id r g b name``, FreeSurfer's ``id name r g b a``, a plain ``id name``,
+    names with spaces (``1 0.1 0.2 0.3 Left Crus I``), and comma or tab
+    separated files; a header line (no integer first) is skipped.
+    """
+    def number(token):
+        try:
+            float(token)
+            return True
+        except ValueError:
+            return False
+
+    names = {}
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].replace(",", " ").replace("\t", " ").replace('"', " ")
+        parts = line.split()
+        if len(parts) < 2 or not parts[0].lstrip("-").isdigit():
+            continue
+        words, started = [], False
+        for token in parts[1:]:
+            if number(token):
+                if started:
+                    break
+                continue
+            words.append(token)
+            started = True
+        if words:
+            names.setdefault(int(parts[0]), " ".join(words))
+    return names
+
+
+def _lut_names(path, lut=None):
+    """``({id: name}, table path or None)`` for an atlas.
+
+    ``lut`` given: that file, wherever it is. Otherwise the tables beside the
+    atlas (``.lut``, ``.txt``, ``.tsv``, ``.csv``) that ``_table_matches`` it,
+    the closest name first; the first that yields any names wins.
+    """
+    candidates = []
+    if lut:
+        candidates = [Path(lut)]
+    else:
+        folder = Path(path).parent
+        atlas = Path(path).name
+        try:
+            found = [t for t in folder.iterdir()
+                     if t.is_file() and t.suffix.lower() in _LUT_SUFFIXES
+                     and not t.name.startswith(".")
+                     and _table_matches(t.name, atlas)]
+        except OSError:
+            found = []
+        # Exact base name first, then the longest shared prefix.
+        candidates = sorted(found, key=lambda t: (_bare(t.name) != _bare(atlas),
+                                                  -len(_bare(t.name)), t.name))
+    for table in candidates:
+        try:
+            names = _parse_table(table.read_text(errors="ignore"))
+        except OSError:
+            continue
+        if names:
+            return names, str(table)
+    return {}, None
+
+
+_tissue = OrderedDict()         # grid key -> world bounds of its tissue
+
+
+def tissue_bounds(grid, margin_mm=3.0):
+    """World ``(xmin, xmax, ymin, ymax, zmin, zmax)`` of the body's TISSUE.
+
+    The grid's own bounds are the scan's field of view. For a template that is
+    the brain plus a little margin, but a native scan's FOV carries air, neck
+    and shoulders, and framing on it leaves the brain small and off centre.
+    This is the box around every voxel at or above the body's automatic start
+    (``body_window``), padded by ``margin_mm``, carried through an oblique
+    grid's rotation. Framing only: the voxels and the window are untouched.
+    """
+    key = _grid_key(grid)
+    if key in _tissue:
+        return _tissue[key]
+    values = np.asarray(grid.point_data["values"])
+    lo, _ = body_window(values)
+    shape = tuple(int(n) for n in grid.dimensions)
+    # Strided so a hi-res level costs a few million points, not a hundred.
+    step = max(1, int(np.ceil((np.prod(shape) / 4e6) ** (1.0 / 3.0))))
+    solid = values.reshape(shape, order="F")[::step, ::step, ::step] >= lo
+    ijk = np.argwhere(solid).astype(float) * step
+    if not ijk.size:
+        return tuple(grid.bounds)
+    # The tissue's own voxels in world space: for an oblique grid, the box of
+    # an index-space box's corners would be inflated by the rotation.
+    world = (np.asarray(grid.origin, float)
+             + (ijk * np.asarray(grid.spacing, float)) @ _direction(grid).T)
+    pad = margin_mm + step * float(max(grid.spacing))
+    lo3, hi3 = world.min(axis=0) - pad, world.max(axis=0) + pad
+    out = (float(lo3[0]), float(hi3[0]), float(lo3[1]), float(hi3[1]),
+           float(lo3[2]), float(hi3[2]))
+    return _remember(_tissue, key, out, 8)
+
+
 # -- resampling -------------------------------------------------------------
 def _on_grid(grid, nifti, smooth_vox=0.0):
     """An overlay resampled onto the body's grid, trilinearly, as the suite does.
@@ -715,6 +928,7 @@ def _on_grid(grid, nifti, smooth_vox=0.0):
     path = str(nifti)
     key = (path, _stamp(path), tuple(grid.dimensions),
            tuple(np.round(grid.spacing, 9)), tuple(np.round(grid.origin, 9)),
+           tuple(np.round(_direction(grid), 9).ravel()),
            float(smooth_vox or 0.0))
     if key in _resampled:
         _resampled.move_to_end(key)
@@ -727,7 +941,9 @@ def _on_grid(grid, nifti, smooth_vox=0.0):
 
         data = gaussian_filter(data, float(smooth_vox))
     inverse = np.linalg.inv(np.asarray(affine, float))
-    matrix = inverse[:3, :3] @ np.diag(np.asarray(grid.spacing, float))
+    # Body voxel -> world (through the grid's rotation, for an oblique native
+    # scan) -> overlay voxel. Overlay and body need only share world space.
+    matrix = inverse[:3, :3] @ _direction(grid) @ np.diag(np.asarray(grid.spacing, float))
     offset = inverse[:3, :3] @ np.asarray(grid.origin, float) + inverse[:3, 3]
     out = _separable(data, matrix, offset, tuple(int(n) for n in grid.dimensions))
     if out is None:
@@ -963,15 +1179,41 @@ def body_cmap(layer):
     return ListedColormap(table, name="cv_body_tinted")
 
 
+# An atlas region is a 0/1 mask, and its surface is where the mask crosses
+# one half. Opacity steps up across a narrow band around it, so the nucleus
+# has a crisp edge at any zoom: a wider window ramps opacity across the whole
+# smoothed edge and leaves a soft, see-through rim. Its COLOUR comes from a
+# fixed, wider window instead, so the samples either side of that band are one
+# light tone rather than flickering black and white.
+_REGION_WINDOW = (0.47, 0.53)
+_REGION_COLOURS = (-0.5, 0.8)     # the surface (0.5) lands at 77% of the palette
+
+
+def _layer_clim(layer):
+    """The body's window as set, or the region window for an atlas region."""
+    if layer.get("clim"):
+        return layer.get("clim")
+    return list(_REGION_WINDOW) if layer.get("body_labels") else None
+
+
+def _colour_window(layer, lo, hi):
+    """Where the body's palette is spread: its window, but for an atlas
+    region left on auto, the fixed region colours."""
+    if layer.get("body_labels") and not layer.get("clim"):
+        return _REGION_COLOURS
+    return lo, hi
+
+
 def _body_tfs(values, layer, scale=1.0):
     """Colour and opacity transfer functions for the body's own scalars."""
     import vtk
 
-    lo, hi = body_window(values, layer.get("clim"))
+    lo, hi = body_window(values, _layer_clim(layer))
     cmap = body_cmap(layer)
+    c0, c1 = _colour_window(layer, lo, hi)
     ctf = vtk.vtkColorTransferFunction()
     for t in np.linspace(0.0, 1.0, 64):
-        ctf.AddRGBPoint(lo + t * (hi - lo), *map(float, cmap(t)[:3]))
+        ctf.AddRGBPoint(c0 + t * (c1 - c0), *map(float, cmap(t)[:3]))
     otf = vtk.vtkPiecewiseFunction()
     # Nothing below the window. The step is a few lookup texels wide: a node
     # pair closer than the GPU's lookup texture resolves makes VTK warn and
@@ -1147,6 +1389,7 @@ def _new_grid(grid, name, array):
 
     out = pv.ImageData(dimensions=grid.dimensions, spacing=grid.spacing,
                        origin=grid.origin)
+    out.direction_matrix = _direction(grid)
     out.point_data[name] = array
     return out
 
@@ -1169,8 +1412,7 @@ _SURFACE_BAKED = ("clim", "cmap", "color")
 # Overlay fields that never reach a painted voxel: captions, ids, and settings
 # that belong to mesh or outline drawing. Toggling a colour bar must not
 # repaint a hundred million voxels.
-_NOT_PAINTED = ("id", "name", "bar", "draw", "outline_width", "outline_smooth",
-                "fill_gaps", "smooth_mm", "mode", "stat", "min_value",
+_NOT_PAINTED = ("id", "name", "bar", "draw", "outline_smooth", "fill_gaps", "smooth_mm", "mode", "stat", "min_value",
                 "keep_top", "step", "xray_mm", "fade")
 _data = OrderedDict()           # data key -> _Data
 _DATA_CACHE = 3
@@ -1194,11 +1436,15 @@ class _Data:
 _PAINT_DEPTH_MM = 0.5
 
 
-def _mode(layer, overlays):
-    """``plain``, ``surface`` (every map painted) or ``volume`` (any x-rayed)."""
+def _mode(layer, overlays, outlines=()):
+    """``plain``, ``surface`` (every map painted) or ``volume`` (any x-rayed).
+    Outlines alone are painted, so they make a layer ``surface`` too."""
     if not overlays:
-        return "plain"
+        return "surface" if outlines else "plain"
     return "volume" if any(_xray_mm(o) > 0 for o in overlays) else "surface"
+
+
+
 
 
 def _xray_mm(overlay):
@@ -1216,7 +1462,8 @@ def _data_key(grid, layer, overlays, mode):
         parts.append(float(layer.get("overlay_smooth_vox") or 0.0))
         parts.append(bool(layer.get("overlay_outside")))
     else:
-        parts = [dict({k: v for k, v in o.items() if k not in _NOT_PAINTED},
+        parts = [dict({k: v for k, v in o.items() if k not in _NOT_PAINTED
+                       and not k.startswith("outline")},
                       _stamp=_stamp(str(o["nifti"]))) for o in overlays]
         parts.append({k: layer.get(k) for k in _SURFACE_BAKED})
         parts.append(bool(layer.get("overlay_outside")))
@@ -1239,7 +1486,7 @@ def _volume_data(grid, layer, overlays, mode):
     return _remember(_data, key, data, _DATA_CACHE, _DATA_BYTES)
 
 
-def build_actor(grid, layer, overlays, material, reuse=None):
+def build_actor(grid, layer, overlays, material, reuse=None, outlines=()):
     """``(vtkVolume, [(values, overlay)], [warning])`` for one volume layer.
 
     ``reuse`` is the actor this layer is on screen with. When the voxels it
@@ -1249,7 +1496,10 @@ def build_actor(grid, layer, overlays, material, reuse=None):
     """
     warnings = []
     overlays = list(overlays or [])
-    mode = _mode(layer, overlays)
+    outlines = list(outlines or [])
+    # Outlines are drawn by the session over the frame; they only decide that
+    # a layer with nothing but outlines is still drawn painted.
+    mode = _mode(layer, overlays, outlines)
     if mode == "volume" and len(overlays) > _MAX_RAYCAST_OVERLAYS:
         warnings.append(
             f"ray-cast overlays are limited to {_MAX_RAYCAST_OVERLAYS}; "
@@ -1303,13 +1553,16 @@ def _style(data, layer, overlays, material):
         prop.IndependentComponentsOff()
         otf = vtk.vtkPiecewiseFunction()
         start8 = data.start8
+        end8 = getattr(data, "end8", 255.0)
         otf.AddPoint(0.0, 0.0)
         if start8 > 0.5:   # a step a few lookup texels wide, not a sliver
             otf.AddPoint(start8 - 0.25, 0.0)
         strength = float(layer.get("opacity", 1.0))
         curve = opacity_curve(layer.get("opacity_profile"))
         for t, a in zip(np.linspace(0.0, 1.0, len(curve)), curve):
-            otf.AddPoint(start8 + t * (255.0 - start8), float(a) * strength)
+            otf.AddPoint(start8 + t * (end8 - start8), float(a) * strength)
+        if end8 < 254.5:
+            otf.AddPoint(255.0, float(curve[-1]) * strength)
         prop.SetScalarOpacity(otf)
         prop.SetScalarOpacityUnitDistance(unit)
         return prop
@@ -1352,7 +1605,7 @@ def _painted_data(grid, values, layer, overlays):
     from calvin_utils.plotting_utils.mesh_paint import _select
     from calvin_utils.plotting_utils.overlay_paint import composite, overlay_colours
 
-    lo, hi = body_window(values, layer.get("clim"))
+    lo, hi = body_window(values, _layer_clim(layer))
     cmap = body_cmap(layer)
     outside = float(np.min(values))
     n = len(values)
@@ -1363,16 +1616,26 @@ def _painted_data(grid, values, layer, overlays):
     # background sits above the margin's floor -- slides the function down
     # and the whole bounding box turns opaque. Never floor below the data.
     floor = max(lo - (hi - lo), outside)
-    start8 = (lo - floor) / (hi - floor) * 255.0
+    # The top of the channel. The window's end, normally: 8 bits spent where
+    # the template's shading lives. An atlas region is a 0/1 mask with a
+    # narrow window, and a channel that saturates a voxel inside its surface
+    # steps the shading gradient into stripes -- so it spans the whole mask.
+    ceiling = hi
+    if layer.get("body_labels"):
+        floor, ceiling = outside, max(hi, float(np.max(values)))
+    start8 = (lo - floor) / (ceiling - floor) * 255.0
+    end8 = (hi - floor) / (ceiling - floor) * 255.0
+
+    c0, c1 = _colour_window(layer, lo, hi)
 
     def base_of(v):
-        return cmap(np.clip((np.asarray(v, float) - lo) / (hi - lo), 0.0, 1.0))[:, :3]
+        return cmap(np.clip((np.asarray(v, float) - c0) / (c1 - c0), 0.0, 1.0))[:, :3]
 
     if values.dtype == np.uint8:
         # 256 possible values: colour and opacity are each a table lookup.
         levels8 = np.arange(256, dtype=float)
         base_lut = np.clip(base_of(levels8) * 255.0, 0, 255).astype(np.uint8)
-        alpha_lut = (np.clip((levels8 - floor) / (hi - floor), 0.0, 1.0)
+        alpha_lut = (np.clip((levels8 - floor) / (ceiling - floor), 0.0, 1.0)
                      * 255.0).astype(np.uint8)
         np.take(base_lut, values, axis=0, out=rgba[:, :3])
         np.take(alpha_lut, values, out=rgba[:, 3])
@@ -1381,10 +1644,16 @@ def _painted_data(grid, values, layer, overlays):
         for start in range(0, n, step):
             v = values[start:start + step].astype(float)
             rgba[start:start + step, :3] = np.clip(base_of(v) * 255.0, 0, 255)
-            rgba[start:start + step, 3] = (np.clip((v - floor) / (hi - floor),
+            rgba[start:start + step, 3] = (np.clip((v - floor) / (ceiling - floor),
                                                    0.0, 1.0) * 255.0)
 
-    raws = [_on_grid(grid, o["nifti"]) for o in overlays]
+    # The same light smoothing the x-ray path applies (``overlay_smooth_vox``,
+    # in the overlay's own voxels): a 2 mm map painted onto a finer body is
+    # otherwise a lattice of its voxel corners -- trilinear kinks and the hard
+    # steps of a mask edge -- printed straight onto the cortex as small dark
+    # triangles (measured on a 2 mm map over the 1 mm sym 09c body).
+    smooth = float(layer.get("overlay_smooth_vox") or 0.0)
+    raws = [_on_grid(grid, o["nifti"], smooth_vox=smooth) for o in overlays]
     active = np.zeros(n, dtype=bool)
     for raw, overlay in zip(raws, overlays):
         active |= _mask(raw, overlay)
@@ -1410,7 +1679,44 @@ def _painted_data(grid, values, layer, overlays):
                                 ).astype(np.uint8)
     rgba[0, 3] = 0      # a corner of the box: pins the channel's floor at 0
     return _Data("surface", _new_grid(grid, "rgba", rgba), "rgba", 0.0,
-                 start8=start8)
+                 start8=start8, end8=end8)
+
+
+def region_actor(grid, layer, overlays, overlay, material):
+    """A body drawn to show only WHERE ``overlay`` is on what the rays reach.
+
+    Same voxels, opacity, cuts and camera as the painted body, but unlit, its
+    colour white where the overlay selects and black elsewhere. Rendered off
+    screen, it is a mask of exactly the patches the painted body shows in that
+    overlay -- on the cortex, in sulci, on cut faces -- and the session traces
+    its edge as the overlay's outline (see outlines.py). ``overlays`` are the
+    layer's fills, so the painted body's voxels are reused from the cache.
+    """
+    data = _volume_data(grid, layer, list(overlays), "surface")
+    rgba = np.asarray(data.grid.point_data["rgba"])
+    from circuit_viewer.outlines import colour_floor
+
+    raw = _on_grid(grid, overlay["nifti"],
+                   smooth_vox=float(layer.get("overlay_smooth_vox") or 0.0))
+    region = _mask(raw, overlay)
+    floor = colour_floor(overlay)
+    if floor is not None:
+        # Only from the colour bar's minimum up: the outline sits there.
+        region &= (np.abs(raw) if overlay["absolute"] else raw) >= floor
+    if not layer.get("overlay_outside"):
+        region &= body_mask(grid)
+    if not region.any():
+        return None
+    marks = np.zeros_like(rgba)
+    marks[:, 3] = rgba[:, 3]
+    marks[region, :3] = 255
+    shown = _Data("surface", _new_grid(data.grid, "rgba", marks), "rgba", 0.0,
+                  start8=data.start8, end8=getattr(data, "end8", 255.0))
+    mapper = _mapper(shown.grid, "rgba")
+    prop = _style(shown, layer, [], material)
+    prop.ShadeOff()
+    _clip(mapper, prop, layer.get("section"), 0.0)
+    return _volume_actor(mapper, prop)
 
 
 def _raycast_data(grid, values, layer, overlays, outside):

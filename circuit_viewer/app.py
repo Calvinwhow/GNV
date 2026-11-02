@@ -13,13 +13,13 @@ would not be fine on an interface anyone else can reach.
 from __future__ import annotations
 
 import json
-import tempfile
 import webbrowser
 from pathlib import Path
 from threading import Lock, Thread, Timer
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from . import scratch
 from .session import RenderSession, catalogue
 from .spec import (
     new_electrode_layer, new_volume_layer,
@@ -63,7 +63,11 @@ def _drop_target(drops, name, item):
 
     drops.mkdir(parents=True, exist_ok=True)
     staged = drops / f".incoming-{uuid4().hex}"
-    item.save(staged)
+    try:
+        item.save(staged)
+    except BaseException:
+        staged.unlink(missing_ok=True)      # a broken upload leaves nothing
+        raise
 
     target = drops / name
     if not target.exists():
@@ -71,6 +75,7 @@ def _drop_target(drops, name, item):
         return target
     if _sha256(staged) == _sha256(target):
         staged.unlink()
+        scratch.touch(target)               # used again: not idle
         return target
 
     # ".nii.gz" has to survive whole, so the split is at the FIRST dot.
@@ -104,13 +109,29 @@ def _write_gif(frames, path, fps=None, durations=None):
     return str(path)
 
 
+def _spec_paths(value):
+    """Every string in a spec, for the scratch protector: a dropped file stays
+    while any layer or overlay of the open figure still names it."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _spec_paths(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _spec_paths(item)
+
+
 def create_app(spec=None, drop_dir=None):
     app = Flask(__name__, static_folder=None)
-    app.config["DROP_DIR"] = str(drop_dir or Path(tempfile.gettempdir()) /
-                                 "circuit_viewer_drops")
+    # Drops are temporary: they live in this run's scratch folder (see
+    # scratch.py), are collected once nothing uses them, and go with the run.
+    app.config["DROP_DIR"] = str(drop_dir or scratch.area("drops"))
     Path(app.config["DROP_DIR"]).mkdir(parents=True, exist_ok=True)
     session = RenderSession(spec or new_spec())
     lock = Lock()
+    scratch.protect(lambda: [p for p in _spec_paths(session.spec)
+                             if p.startswith(str(scratch.SCRATCH_ROOT))])
 
     @app.get("/")
     def index():
@@ -155,6 +176,32 @@ def create_app(spec=None, drop_dir=None):
 
         return jsonify(library())
 
+    @app.get("/api/slices/info")
+    def api_slice_info():
+        """Bounds, axes and voxel size of any slice backdrop -- a temporary
+        NIfTI included -- in the shape the backdrop library lists them."""
+        reference = request.args.get("backdrop", "")
+        try:
+            with lock:
+                back = session.backdrop(reference)
+                lo, hi = back.bounds()
+                info = {"path": reference, "name": Path(reference).name,
+                        "bounds": [[float(v) for v in lo], [float(v) for v in hi]],
+                        "world_axes": [back.world_axis(a)[0] for a in range(3)],
+                        "mm": float(back.mm)}
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+        return jsonify(info)
+
+    @app.get("/api/volumes/labels")
+    def api_volume_labels():
+        """The regions of a label atlas used as a body, named from its LUT:
+        ``{"labels": [...], "table": path or None}``."""
+        from circuit_viewer.volume_render import atlas_labels
+
+        return jsonify(atlas_labels(request.args.get("source", ""),
+                                    request.args.get("lut") or None))
+
     @app.post("/api/volumes/levels")
     def api_volume_levels():
         """Build a large body's levels as a background job, polled on the same
@@ -182,11 +229,12 @@ def create_app(spec=None, drop_dir=None):
             return jsonify({"error": "no file in the request"}), 400
         name = Path(item.filename).name
         allowed = (".nii", ".nii.gz", ".mat", ".npy", ".npz", ".tck", ".trk",
-                   ".json")
+                   ".trx", ".json", ".lut", ".txt", ".tsv", ".csv")
         if not name.lower().endswith(allowed):
             return jsonify(
                 {"error": f"{name} is not a volume, tractogram, lead or "
                           f"fibre descriptor"}), 400
+        scratch.sweep()
         target = _drop_target(Path(app.config["DROP_DIR"]), name, item)
         # A tractogram and an electrode reconstruction are both ".mat", so what
         # this is has to be read out of the file rather than off its name. Done
@@ -208,8 +256,12 @@ def create_app(spec=None, drop_dir=None):
                 kind = "fiber_desc"
             else:
                 kind = "electrode" if looks_like_electrode(target) else "tract"
-        elif lower.endswith((".tck", ".trk", ".npz", ".npy")):
+        elif lower.endswith((".tck", ".trk", ".trx", ".npz", ".npy")):
             kind = "tract"
+        elif lower.endswith((".lut", ".txt", ".tsv", ".csv")):
+            # An atlas's lookup table, dropped with it so the two sit side by
+            # side in the drop folder and its regions can be listed by name.
+            kind = "lut"
         return jsonify({"path": str(target), "name": name, "kind": kind})
 
     @app.get("/api/descriptor")
@@ -318,6 +370,7 @@ def create_app(spec=None, drop_dir=None):
                     scalar_bar=q.get("bar", "1") != "0",
                     camera=camera or None,
                     antialias=q.get("aa"),
+                    line_scale=float(q.get("ls", 1) or 1),
                 )
         except Exception as exc:                     # surfaced in the UI status line
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
@@ -362,6 +415,7 @@ def create_app(spec=None, drop_dir=None):
             size = (int(body.get("width", 800)), int(body.get("height", 640)))
             fps = max(float(body.get("fps", 15)), 1.0)
             quality = body.get("quality", "preview")
+            line_scale = float(body.get("line_scale", 1) or 1)
             base = normalize_spec(body.get("spec") or session.spec)
         except Exception as exc:
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
@@ -393,7 +447,8 @@ def create_app(spec=None, drop_dir=None):
                             camera = {k: float(step[k]) for k in
                                       ("azimuth", "elevation", "zoom") if k in step}
                             png = session.render(size=size, quality=quality,
-                                                 camera=camera)
+                                                 camera=camera,
+                                                 line_scale=line_scale)
                             frames.append(Image.open(_io.BytesIO(png)).convert("RGB"))
                             anim["done"] += 1
                     finally:
@@ -438,6 +493,7 @@ def create_app(spec=None, drop_dir=None):
                     body["path"],
                     size=(int(body.get("width", 4000)), int(body.get("height", 3200))),
                     scalar_bar=bool(body.get("scalar_bar", True)),
+                    line_scale=float(body.get("line_scale", 1) or 1),
                 )
         except Exception as exc:
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
@@ -488,6 +544,14 @@ def create_app(spec=None, drop_dir=None):
             return jsonify({"error": str(exc)}), 400
         return jsonify({"path": str(root), "parent": str(root.parent),
                         "entries": entries[:2000]})
+
+    # Optional add-on, self-contained in lineart/ (its own routes). Delete
+    # these lines to remove it; the viewer runs the same with or without it.
+    try:
+        from .lineart import attach as _attach_lineart
+        _attach_lineart(app, session, lock)
+    except Exception as exc:
+        print(f"circuit_viewer: line art add-on not loaded: {exc!r}")
 
     return app
 

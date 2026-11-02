@@ -99,6 +99,12 @@ MESH_LAYER = {
     "edge_color": "#ffffff",
     "edge_width": 0.6,
     "edge_opacity": 0.10,     # independent of the mesh's own opacity
+    # Paint the wireframe with the colouring maps too: each edge takes the
+    # map's colour where the map survives and the edge colour elsewhere (or
+    # nothing, with "edges" off). edge_opacity scales the whole wireframe. With
+    # the mesh's own opacity at 0 this leaves a see-through cage whose map
+    # region still reads -- so a slice inside the brain stays visible.
+    "edge_paint": False,
     # Which halves of the group to draw at all. Explicit, because hiding a
     # hemisphere is a decision about the figure, not about the camera.
     "show_left": True,
@@ -148,8 +154,9 @@ FIBER_LAYER = {
     "clim": None,
     # Drop atlas fibres that no overlay paints. A whole-atlas tractogram is
     # mostly fibres a given result says nothing about, and drawing them buries
-    # the ones it does.
-    "values_only": False,
+    # the ones it does. On by default: an atlas has no values of its own, so its
+    # fibres get no colour unless an overlay's threshold window shows them.
+    "values_only": True,
     # Waypoint gates, ANDed. Each is a plane in world millimetres that a fibre
     # must cross ("through") or must not ("avoid"), which is how a bundle is
     # isolated from a whole-brain tractogram to show its course.
@@ -197,6 +204,12 @@ OVERLAY = {
     # This spreads values from painted vertices into their unpainted neighbours
     # across the mesh, so a connected patch is coloured throughout.
     "fill_gaps": 0,
+    # Grow the map's coloured regions outward by this many millimetres: each
+    # voxel it leaves uncoloured within reach takes the value of the NEAREST
+    # coloured voxel (copied, never averaged), so a map that stops just short of
+    # the cortex, a slice rim or a nucleus edge covers it. Applies to every
+    # geometry the map is drawn on, because the map itself is grown. 0 = off.
+    "extend_mm": 0.0,
     # Which frame of a 4D map (or of a fibres x time value array) is shown.
     "frame": 0,
     # How far the colour scale overrides what is under it, 0..1. At 1 every
@@ -231,7 +244,14 @@ OVERLAY = {
     # t map can colour the surface while its significant part is only traced.
     # Mesh layers only.
     "draw": "fill",
-    "outline_width": 3.0,     # line width, pixels
+    # OUTLINE: trace the edge of whatever this overlay selects (its nonzero
+    # voxels, for a plain map) in its own colour and opacity, on meshes, slices
+    # and volume bodies alike -- with the fill, or instead of it (draw:
+    # "outline"). Like a mesh's edge highlight: a line, not a colour change.
+    "outline": False,
+    "outline_color": "#ffffff",
+    "outline_opacity": 1.0,
+    "outline_width": 2.0,     # line width, pixels
     "outline_smooth": 1.0,    # Gaussian sigma in voxels on the mask before tracing
 }
 
@@ -270,11 +290,23 @@ VOLUME_LAYER = {
     "opacity_profile": "linear",
     "opacity": 1.0,            # scales the body's opacity transfer function
     "shade": True,             # gradient shading from the scene's lighting rig
+    # Gaussian on the body, in its own voxels. Unsmoothed, the lighting on a
+    # body shows its voxel grid as a lattice of small dimples ("pocking") --
+    # on an 8-bit 1 mm template as much as a label map -- so the default is a
+    # light 0.75; about 1 for a label / segmentation map (CAT12 p0, aseg),
+    # whose class staircase otherwise renders as crinkled partial-volume noise.
+    "body_smooth_vox": 0.75,
+    # A label atlas as the body: only these label values are drawn (SUIT's
+    # 29 is the left dentate). Empty draws the whole volume.
+    "body_labels": [],
+    # The lookup table that names those labels, when it is not a file beside
+    # the atlas named like it (see volume_render._lut_names). Names only.
+    "body_lut": None,
     # -- how overlays colour it ------------------------------------------
     # Overlays only ever change the body's colour; its shape, opacity and
     # lighting stay its own. Whether a map is painted on the surface or x-rayed
     # through the brain is set on each overlay (``xray_mm``).
-    "overlay_smooth_vox": 0.75,  # x-rayed maps: Gaussian on each overlay, its voxels
+    "overlay_smooth_vox": 0.75,  # every map, painted or x-rayed: Gaussian, its voxels
     # Overlays are drawn only inside the body unless this is on: a map that
     # runs past the brain would otherwise show as colour in the air around it.
     "overlay_outside": False,
@@ -289,7 +321,7 @@ SLICE_LAYER = {
     "kind": "slices",
     "name": "Slices",
     "visible": True,
-    "backdrop": None,          # a name in the backdrop library, or a .npz path
+    "backdrop": None,          # a library name, a .npz path, or a NIfTI (temporary, in memory)
     "x": None, "y": None, "z": None,      # world mm; None -> the middle
     "show_x": True, "show_y": True, "show_z": True,
     "opacity": 1.0,
@@ -428,6 +460,12 @@ def normalize_spec(spec):
             layer["color"] = str(layer["color"]) if layer.get("color") else None
             layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
             layer["overlay_smooth_vox"] = max(float(layer.get("overlay_smooth_vox") or 0.0), 0.0)
+            layer["body_smooth_vox"] = min(max(float(layer.get("body_smooth_vox") or 0.0), 0.0), 5.0)
+            layer["body_lut"] = str(layer["body_lut"]) if layer.get("body_lut") else None
+            try:
+                layer["body_labels"] = sorted({int(v) for v in (layer.get("body_labels") or [])})
+            except (TypeError, ValueError):
+                raise SpecError("body_labels must be whole numbers")
             layer["overlay_outside"] = bool(layer.get("overlay_outside"))
 
         if kind == "mesh":
@@ -521,7 +559,17 @@ def _overlays(raw, layer, inherited=None):
         _check(item["stat"] in STATS, f"overlay stat must be one of {STATS}")
         _check(item["sign"] in SIGNS, f"overlay sign must be one of {SIGNS}")
         _check(item["draw"] in DRAWS, f"overlay draw must be one of {DRAWS}")
-        item["outline_width"] = max(float(item["outline_width"] or 3.0), 0.5)
+        # The older outline-only mode traced in the overlay's own colour; keep
+        # that look for figures saved with it.
+        if item["draw"] == "outline":
+            item["outline"] = True
+            if "outline_color" not in entry:
+                item["outline_color"] = item.get("color") or "#000000"
+        item["outline"] = bool(item.get("outline"))
+        item["outline_color"] = str(item.get("outline_color") or "#ffffff")
+        item["outline_opacity"] = min(max(float(1.0 if item.get("outline_opacity") is None
+                                                else item["outline_opacity"]), 0.0), 1.0)
+        item["outline_width"] = max(float(item["outline_width"] or 2.0), 0.5)
         item["outline_smooth"] = max(float(item["outline_smooth"] or 0.0), 0.0)
         item["opacity"] = min(max(float(item["opacity"]), 0.0), 1.0)
         item["smooth_mm"] = min(max(float(item.get("smooth_mm") or 0.0), 0.0), 20.0)

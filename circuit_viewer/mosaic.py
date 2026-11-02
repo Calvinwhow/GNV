@@ -44,7 +44,6 @@ from __future__ import annotations
 import copy
 import io
 import os
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -461,11 +460,13 @@ def _hemisphere_gates(keep):
 
 
 def _half_mask(side):
-    """A 2 mm mask of one half of MNI space, written once to the temp dir."""
+    """A 2 mm mask of one half of MNI space, written once per run to the
+    viewer's scratch folder (and removed with it)."""
     import nibabel as nib
 
-    folder = Path(tempfile.gettempdir()) / "circuit_viewer_mosaic"
-    folder.mkdir(exist_ok=True)
+    from circuit_viewer import scratch
+
+    folder = scratch.area("mosaic")
     path = folder / f"half_{side}.nii.gz"
     if not path.is_file():
         shape = (101, 131, 111)                     # x -100..100, 2 mm

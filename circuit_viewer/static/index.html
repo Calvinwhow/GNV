@@ -50,18 +50,23 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #toolbar{display:flex;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 #toolbar button{flex:1;min-width:64px;font-size:12px}
 #layers{flex:1;overflow-y:auto;padding:10px 12px}
-#add{display:flex;gap:6px;padding:10px 14px;border-top:1px solid var(--line)}
-#newgroup{
-  margin:0 12px 10px;padding:14px 10px;border:1.5px dashed var(--line);
+#addpanel{border-top:1px solid var(--line);padding:8px 12px 10px}
+#addpanel summary{cursor:pointer;color:var(--ink-dim);font-size:11px;
+  text-transform:uppercase;letter-spacing:.6px;padding:3px 2px}
+#addpanel[open] summary{margin-bottom:8px}
+#newgroup{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#newgroup .ng.wide{grid-column:1 / -1}
+#newgroup .ng{
+  padding:10px 8px;border:1.5px dashed var(--line);
   border-radius:var(--radius);text-align:center;cursor:pointer;
   display:flex;flex-direction:column;gap:3px;color:var(--ink-dim);
 }
 #newgroup strong{color:var(--ink);font-size:12px;font-weight:600}
 #newgroup span{font-size:11px}
-#newgroup:hover{border-color:var(--accent)}
-#newgroup.over,.layer.over{border-color:var(--accent);background:rgba(122,162,216,.14)}
+#newgroup .ng:hover{border-color:var(--accent)}
+#newgroup .ng.over,.layer.over,.row.over{border-color:var(--accent);background:rgba(122,162,216,.14)}
+.row.over{outline:1.5px dashed var(--accent);outline-offset:2px;border-radius:4px}
 .layer.over{border-style:dashed}
-#add button{flex:1}
 
 /* ---- layer card ---- */
 .layer{
@@ -187,17 +192,34 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   <div id="layers"></div>
   <details id="scenepanel"><summary>Scene</summary><div id="scene"></div></details>
   <details id="lightpanel"><summary>Lighting</summary><div id="lighting"></div></details>
+  <!-- One box per layer kind: click for an empty layer, or drop files on it.
+       Dropped files are temporary (the viewer's scratch folder): deleted once
+       unused and when the viewer closes. Prepare keeps a volume for reuse. -->
+  <details id="addpanel" open>
+  <summary>Add a layer</summary>
   <div id="newgroup">
-    <strong>+ New group</strong>
-    <span>drop a NIfTI here, or click</span>
+    <div class="ng" id="ng-mesh" title="Click for an empty mesh group, or drop one or more NIfTIs to surface them (a label volume splits into its regions). Dropped files are temporary.">
+      <strong>+ Mesh</strong>
+      <span>drop NIfTIs to surface them</span>
+    </div>
+    <div class="ng" id="ng-volume" title="Click for an empty volume layer, or drop a NIfTI to ray-cast it straight from the file. Dropped files are temporary — Prepare keeps a body. Drop an atlas with its lookup table to pick regions by name.">
+      <strong>+ Volume</strong>
+      <span>drop a NIfTI to ray-cast it · an atlas + its .lut for regions</span>
+    </div>
+    <div class="ng" id="ng-slices" title="Click for an empty slice layer, or drop a NIfTI (or a prepared .npz) to slice through it. Dropped files are temporary — Prepare keeps a backdrop.">
+      <strong>+ Slices</strong>
+      <span>drop a NIfTI to slice through it</span>
+    </div>
+    <div class="ng" id="ng-fibers" title="Click for an empty fibre layer. Drop a tractogram (.tck, .trk, .trx, Lead-DBS .mat, or a fibre .npz) to draw it, or a .fib.desc.json result together with its .fib.values.npy: the descriptor names its own atlas, and the values colour those fibres. More .npy value files can be dropped onto the fibre layer later. Dropped files are temporary.">
+      <strong>+ Fibers</strong>
+      <span>drop a .tck / .trk / .mat tractogram · or a .fib.desc.json with its .npy values to colour it</span>
+    </div>
+    <div class="ng wide" id="ng-electrode" title="Click for an empty electrode layer, or drop a Lead-DBS reconstruction (ea_reconstruction.mat) or the equivalent .json to place its leads. Dropped files are temporary.">
+      <strong>+ Electrode</strong>
+      <span>drop a Lead-DBS ea_reconstruction.mat, or the equivalent .json</span>
+    </div>
   </div>
-  <div id="add">
-    <button id="b-mesh">+ Mesh</button>
-    <button id="b-fibers">+ Fibers</button>
-    <button id="b-volume">+ Volume</button>
-    <button id="b-slices">+ Slices</button>
-    <button id="b-electrode" title="a Lead-DBS reconstruction or electrode model">+ Electrode</button>
-  </div>
+  </details>
 </div>
 
 <div id="view">
@@ -225,5 +247,8 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 </div></div>
 
 <script src="/static/app.js"></script>
+<!-- Optional add-on (circuit_viewer/lineart/): adds its own Line art button
+     and panel. Delete this line to remove it. -->
+<script src="/lineart/lineart.js"></script>
 </body>
 </html>

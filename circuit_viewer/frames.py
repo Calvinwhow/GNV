@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import tempfile
 from collections import OrderedDict
 from pathlib import Path
 
@@ -25,7 +24,6 @@ import numpy as np
 
 __all__ = ["frame_count", "frame_path", "resolve"]
 
-_CACHE_DIR = Path(tempfile.gettempdir()) / "circuit_viewer_frames"
 _counts = {}                    # (path, mtime) -> frames
 _series = OrderedDict()         # (path, mtime) -> (array, affine or None)
 _scales = {}                    # (path, mtime, band) -> pinned scale fields
@@ -109,12 +107,18 @@ def frame_path(path, frame):
     path = str(Path(str(path)).expanduser())
     total = frame_count(path)
     frame = int(frame) % total
+    from . import scratch
+
     tag = hashlib.sha1(f"{path}|{_stamp(path)}".encode()).hexdigest()[:16]
-    _CACHE_DIR.mkdir(exist_ok=True)
+    # Frame copies are a cache in this run's scratch folder: touched when
+    # reused, swept once idle, and gone with the run (see scratch.py).
+    folder = scratch.area("frames")
     nifti = _kind(path) == "nifti"
-    out = _CACHE_DIR / (f"{tag}_f{frame:04d}" + (".nii" if nifti else ".fib.values.npy"))
+    out = folder / (f"{tag}_f{frame:04d}" + (".nii" if nifti else ".fib.values.npy"))
     if out.is_file():
+        scratch.touch(out)
         return str(out)
+    scratch.sweep()
     data, affine = _load(path)
     temp = out.with_name(f".{out.name}.{os.getpid()}.partial")
     if nifti:

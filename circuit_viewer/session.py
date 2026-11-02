@@ -33,6 +33,7 @@ import hashlib
 import io
 import json
 import os
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -98,6 +99,14 @@ _GEOMETRY_KEYS = ("mesh", "tessellate", "iso", "split", "presmooth_vox",
 _LOAD_KEYS = ("mesh", "iso", "split", "presmooth_vox")
 _FIBER_KEYS = ("source", "fiber_atlas_path", "sign", "min_abs_value",
                "max_abs_value", "top_percent", "max_lines", "step", "smooth")
+# How many cached builds no open layer uses are kept anyway (most recent first):
+# enough to step a slider back without rebuilding, few enough that a long
+# session does not hold every value it passed through. A loaded fibre set is the
+# largest (streamlines and tubes), so only one spare.
+_SPARE_GEOMETRY = 3
+_SPARE_GROUPS = 2
+_SPARE_FIBERS = 1
+_SPARE_INTERIORS = 4
 
 BASE_COLOR = "#b7bcc4"
 
@@ -213,6 +222,47 @@ def _section_group(group, layer):
     return kept
 
 
+def _nifti_backdrop(path):
+    """A NIfTI as a slice backdrop, in memory, without converting it.
+
+    The converter's ``.npz`` stores each slice as 8-bit for fast reads; this
+    does the same in memory: the volume (first frame of a 4D) is scaled to
+    0..255 between the 0.5th and 99.5th percentiles of its nonzero voxels, so
+    "transparent below" and the grey ramp mean what they mean on a prepared
+    backdrop. Its own affine is kept -- slices are cut and placed by it, oblique
+    or not -- and nothing touches the disk.
+    """
+    from calvin_utils.plotting_utils.backdrops import Backdrop
+    from calvin_utils.plotting_utils.mesh_paint import _volume
+
+    data, affine = _volume(str(path))
+    data = np.asarray(data, np.float32)
+    nonzero = data[np.isfinite(data) & (data != 0)]
+    lo, hi = (np.percentile(nonzero, [0.5, 99.5]) if nonzero.size else (0.0, 1.0))
+    if not hi > lo:
+        lo, hi = float(np.min(data)), float(np.max(data)) or 1.0
+    scaled = np.clip((data - lo) / (hi - lo), 0.0, 1.0) * 254.0 + 1.0
+    scaled[data == 0] = 0.0              # empty stays empty (and transparent)
+    volume = np.rint(scaled).astype(np.uint8)
+
+    class _InMemory(Backdrop):
+        def __init__(self):             # noqa: D401 -- no store to open
+            self.path = Path(path)
+            self._store = None
+            self.shape = tuple(int(n) for n in volume.shape)
+            self.affine = np.asarray(affine, float)
+            zooms = np.linalg.norm(self.affine[:3, :3], axis=0)
+            self.mm = float(zooms.min())
+            self.meta = {"shape": list(self.shape), "affine": self.affine.tolist(),
+                         "mm": self.mm, "zooms": zooms.tolist(), "temporary": True}
+
+        def slice(self, axis, index):
+            index = int(np.clip(index, 0, self.shape[axis] - 1))
+            return np.take(volume, index, axis=axis)
+
+    return _InMemory()
+
+
 def _spec_key(overlay):
     """An overlay's identity for its colour bar: its content, minus its id."""
     if overlay.get("_spec_key"):
@@ -222,15 +272,26 @@ def _spec_key(overlay):
 
 
 def _framed(overlay):
-    """A 4D overlay pointed at its current frame (see ``frames``); anything
+    """A 4D overlay pointed at its current frame (see ``frames``), and a map
+    with ``extend_mm`` pointed at its grown copy (see ``extend``); anything
     else unchanged. Done here, where every painter collects its overlays, so
     meshes, slices, bodies and fibres all play a series the same way."""
-    from circuit_viewer import frames
+    from circuit_viewer import extend, frames
 
+    key = _spec_key(overlay)
     try:
-        return frames.resolve(overlay, _spec_key(overlay))
+        overlay = frames.resolve(overlay, key)
     except Exception:
         return overlay          # an unreadable file is reported by its painter
+    # Then grow the (frame of the) map, if asked: see ``extend``.
+    try:
+        return extend.resolve(overlay, key)
+    except Exception as exc:  # draw the map unextended, but say so
+        import sys
+
+        print(f"circuit_viewer: could not extend {overlay.get('nifti')}: {exc!r}",
+              file=sys.stderr)
+        return overlay
 
 
 def _fills(overlays):
@@ -240,13 +301,95 @@ def _fills(overlays):
 
 
 def _outlines(overlays):
+    """The overlays traced as an outline: ``outline`` on, or the older
+    outline-only ``draw`` mode (which also turns the fill off)."""
     return [_framed(o) for o in (overlays or [])
-            if o.get("draw") == "outline" and o.get("nifti")]
+            if (o.get("outline") or o.get("draw") == "outline") and o.get("nifti")]
+
+
+def _outline_style(overlay):
+    """``(colour, opacity, width px)`` of an overlay's outline."""
+    return (overlay.get("outline_color") or overlay.get("color") or "#000000",
+            float(overlay.get("outline_opacity", 1.0)),
+            float(overlay.get("outline_width", 2.0) or 2.0))
+
+
+def _coloured(values, overlay):
+    """Where an overlay's values put colour, for its outline, as 0..1 with the
+    edge at 0.5: what survived its threshold and, on a sequential scale, what
+    is at or above the colour bar's minimum -- so the outline sits at the
+    bar's lower limit. Near that limit the field follows the value itself, so
+    the edge falls between vertices where the value actually crosses it
+    rather than on whichever vertex came first. A diverging scale has no such
+    limit (its low end is the strongest negative), so there it is everything
+    that survived."""
+    from calvin_utils.plotting_utils.overlay_paint import scale_for
+
+    values = np.asarray(values, float)
+    present = np.isfinite(values)
+    field = np.zeros(values.shape, np.float32)
+    if not present.any():
+        return field
+    _cmap, clim = scale_for(values[present], overlay)
+    low, high = min(clim), max(clim)
+    if low < 0.0 < high:
+        field[present] = 1.0
+        return field
+    band = max((high - low) * 0.05, 1e-9)
+    field[present] = np.clip(0.5 + (values[present] - low) / (2.0 * band), 0.0, 1.0)
+    return field
+
+
+# How far along the surface a mesh outline's coloured/uncoloured field is
+# averaged before it is traced: enough to round off the triangles (~1 mm
+# edges on a cortical mesh), far less than a sulcus.
+_OUTLINE_SMOOTH_MM = 1.5
+
+
+def _surface_average(mesh, values, radius_mm):
+    """Plain averaging of a vertex field over its 1-ring, repeated until about
+    ``radius_mm`` of surface is covered -- along the mesh, never across a
+    sulcus. (``_vertex_smooth`` treats zero as missing data; this does not.)"""
+    values = np.asarray(values, float)
+    if radius_mm <= 0 or len(values) != mesh.n_points or mesh.n_cells == 0:
+        return values
+    pairs, length = _surface_edges(mesh)
+    if not len(pairs):
+        return values
+    passes = max(1, int(np.ceil(float(radius_mm) / max(length, 1e-6))))
+    a, b = pairs[:, 0], pairs[:, 1]
+    n = len(values)
+    degree = np.bincount(a, minlength=n) + np.bincount(b, minlength=n) + 1.0
+    out = values.copy()
+    for _ in range(min(passes, 20)):
+        out = (out + np.bincount(a, weights=out[b], minlength=n)
+               + np.bincount(b, weights=out[a], minlength=n)) / degree
+    return out
+
+
+def _line_actor(poly):
+    """A bare line actor for ``poly`` (which may be empty, unlike add_mesh)."""
+    import vtk
+
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetInputData(poly)
+    mapper.ScalarVisibilityOff()
+    actor = vtk.vtkActor()
+    actor.SetMapper(mapper)
+    actor.GetProperty().SetLighting(False)
+    return actor
 
 
 def _auto(value, default):
     """A layer field of None means 'decide for me'."""
     return default if value is None else value
+
+
+def _edges_on(layer, geom, fills):
+    """Whether a mesh draws its plain edge highlight: asked for, or by default
+    on a region set that is not painted as a gradient."""
+    gradient = any(o.get("mode") == "vertex" for o in fills)
+    return bool(_auto(layer["edges"], geom["region_set"] and not gradient))
 
 
 def _key(layer, fields):
@@ -477,17 +620,32 @@ def _vertex_smooth(mesh, values, radius_mm, support=0.5):
 class RenderSession:
     def __init__(self, spec=None):
         self.spec = normalize_spec(spec or {})
-        self._geometry = {}
-        self._groups = {}    # loaded mesh groups, before any cutting
-        self._fibers = {}
+        # Built geometry, by everything that shapes it. OrderedDicts in the
+        # order last used: _prune_caches keeps whatever an open layer needs
+        # plus a few recent others, so dragging a slider back is instant but a
+        # long session does not keep every value it ever passed through.
+        self._geometry = OrderedDict()
+        self._groups = OrderedDict()   # loaded mesh groups, before any cutting
+        self._fibers = OrderedDict()
         self._electrodes = {}   # placed lead geometry, by source
         self._layer_warnings = {}   # layer id -> complaints, while it lives
         self._drawing = None        # the layer being built, for warn()
-        self._interiors = {}      # mesh group + step -> interior points
+        self._interiors = OrderedDict()   # mesh group + step -> interior points
         self._backdrops = {}      # path -> open Backdrop (slices read on demand)
         self._volume_grids = {}   # (source, level) -> body grid
+        self._framing = {}        # volume actor address -> its tissue bounds
+        self._lines = {}          # outline actor address -> (actor, width)
+        self._projections = {}    # volume layer id -> [(surface, colour, opacity, width)]
+        self._projector = None    # off-screen renderer for those, made on first use
         self._quality = "preview" # the render being built, for body levels
         self._font_scale = 1
+        # How many times larger than it will be SEEN this frame is drawn: hi-res
+        # renders 1.6x the pane and an export renders the pane at ~4000 px, and
+        # each is then shown or placed at the pane's size. Line widths are
+        # multiplied by it, so an edge or outline keeps the thickness it has on
+        # screen instead of thinning to a fraction of a pixel -- which blends it
+        # into the background and drains its colour.
+        self._line_scale = 1.0
         self.view = None          # the last frame's framing, for panning
         self._plotter = None
         self._plotter_size = None
@@ -512,6 +670,7 @@ class RenderSession:
     def _mesh_geometry(self, layer):
         cache_key = _key(layer, _GEOMETRY_KEYS)
         if cache_key in self._geometry:
+            self._geometry.move_to_end(cache_key)
             return self._geometry[cache_key]
 
         # Loading is cached apart from cutting. Meshing a whole-brain volume is
@@ -522,6 +681,8 @@ class RenderSession:
         # only decides what is shown of it.
         load_key = _key(layer, _LOAD_KEYS)
         group = self._groups.get(load_key)
+        if group is not None:
+            self._groups.move_to_end(load_key)
         if group is None:
             group = resolve_meshes(layer["mesh"], iso=layer.get("iso"),
                                    split=layer.get("split", "auto"),
@@ -646,9 +807,44 @@ class RenderSession:
                                    for v, o in zip(stacks, overlays)])
         for values, overlay in zip(stacks, overlays):
             self._record_scale(overlay, values)
-        return {"mode": "rgb",
-                "values": (painted * 255).astype(np.uint8),
-                "target": self._target(geom)}
+        out = {"mode": "rgb",
+               "values": (painted * 255).astype(np.uint8),
+               "target": self._target(geom)}
+        if layer.get("edge_paint"):
+            out["edges"] = self._edge_paint(layer, stacks, overlays,
+                                            _edges_on(layer, geom, overlays))
+        return out
+
+    @staticmethod
+    def _edge_paint(layer, stacks, overlays, unmapped=True):
+        """RGBA for a map-painted wireframe.
+
+        The overlays are composited over the EDGE colour exactly as they are
+        over the surface, then the whole wireframe is scaled by the edge
+        opacity -- the slider means the same with "by map" on as off. Edges no
+        map colours are drawn in the edge colour when ``unmapped`` (the edge
+        highlight's own checkbox) and left out otherwise, so turning that box
+        off keeps only the map's edges."""
+        from calvin_utils.plotting_utils.overlay_paint import overlay_colours
+        from matplotlib.colors import to_rgb
+
+        size = len(stacks[0])
+        # Straight-alpha "over", carried premultiplied: a map's colour is only
+        # diluted by the edge colour as far as that edge is itself visible, so
+        # with the edge opacity at 0 the map's edges keep their true colour.
+        alpha = np.full(size, 1.0 if unmapped else 0.0)
+        premul = np.tile(np.asarray(to_rgb(layer["edge_color"]), float),
+                         (size, 1)) * alpha[:, None]
+        for values, overlay in zip(stacks, overlays):
+            rgb, a = overlay_colours(values, overlay)
+            a = np.asarray(a, float)
+            premul = np.asarray(rgb, float) * a[:, None] + premul * (1.0 - a)[:, None]
+            alpha = a + alpha * (1.0 - a)
+        rgb = np.divide(premul, alpha[:, None], out=np.zeros_like(premul),
+                        where=alpha[:, None] > 1e-6)
+        alpha = alpha * float(layer["edge_opacity"])
+        rgba = np.concatenate([rgb, alpha[:, None]], axis=1)
+        return (np.clip(rgba, 0.0, 1.0) * 255).astype(np.uint8)
 
     @staticmethod
     def _overlay_key(overlay):
@@ -763,6 +959,9 @@ class RenderSession:
         full = geom["full_group"]
         if interior_key not in self._interiors:
             self._interiors[interior_key] = parcel_interiors(full, step=step)
+            while len(self._interiors) > _SPARE_INTERIORS:
+                self._interiors.popitem(last=False)
+        self._interiors.move_to_end(interior_key)
 
         values = parcel_stats(
             full, overlay["nifti"], stat=overlay["stat"], sign=overlay["sign"],
@@ -859,10 +1058,11 @@ class RenderSession:
             if (layer_id not in wanted
                     or self._layer_keys.get(layer_id) != wanted[layer_id][0]):
                 for actor in self._actors.pop(layer_id):
-                    pl.remove_actor(actor, reset_camera=False, render=False)
+                    self._remove(pl, actor)
                 self._layer_keys.pop(layer_id, None)
                 self._cull_map.pop(layer_id, None)
                 self._slice_state.pop(layer_id, None)
+                self._projections.pop(layer_id, None)
 
         for layer_id, (key, layer) in wanted.items():
             if layer_id in self._actors:
@@ -874,6 +1074,33 @@ class RenderSession:
         self._culls = [pair for layer_id in self._actors
                        for pair in self._cull_map.get(layer_id, ())]
         self._move_slices()
+        self._prune_caches()
+
+    def _prune_caches(self):
+        """Forget built geometry no open layer uses, past a few recent spares.
+
+        Every Smoothness value, section position and fibre threshold used to
+        stay cached for the life of the session -- a mesh copy or a set of
+        streamlines and tubes each -- so memory climbed as you worked even with
+        every layer closed (measured: about 140 MB a round of edits). Entries an
+        open layer needs are always kept; of the rest, only the most
+        recently used few, so stepping a slider back stays instant. A layer
+        hidden with its eye still counts as open."""
+        # Hidden layers count as in use: they are still in the figure, and
+        # showing one again must not re-mesh a volume.
+        live = {"geometry": set(), "groups": set(), "fibers": set()}
+        for layer in self.spec["layers"]:
+            if layer["kind"] == "mesh" and layer.get("mesh"):
+                live["geometry"].add(_key(layer, _GEOMETRY_KEYS))
+                live["groups"].add(_key(layer, _LOAD_KEYS))
+            elif layer["kind"] == "fibers" and layer.get("source"):
+                live["fibers"].add(_key(layer, _FIBER_KEYS))
+        for cache, keep, spare in ((self._geometry, live["geometry"], _SPARE_GEOMETRY),
+                                   (self._groups, live["groups"], _SPARE_GROUPS),
+                                   (self._fibers, live["fibers"], _SPARE_FIBERS)):
+            unused = [k for k in cache if k not in keep]      # oldest first
+            for k in unused[:max(len(unused) - spare, 0)]:
+                del cache[k]
 
     def _move_slices(self):
         """Re-aim slice planes without touching the actors that draw them.
@@ -909,6 +1136,8 @@ class RenderSession:
                 entry[0].points = quad.points
                 entry[1].SetTexture(texture)
                 entry[2] = float(wanted)
+                for overlay, line in entry[3] if len(entry) > 3 else ():
+                    self._slice_outline(None, back, axis, float(wanted), overlay, line)
 
     def _slice_overlays(self, layer, record=False):
         """A slice layer's overlays with their scales pinned to the MAP.
@@ -983,15 +1212,15 @@ class RenderSession:
         warning on its layer, not a failed render."""
         from circuit_viewer import volume_render as vr
 
-        if _outlines(layer.get("overlays")):
-            self.warn("outline overlays are drawn on mesh layers only; "
-                      "skipped on this volume layer")
         try:
             source = vr.resolve_source(layer["source"])
-            grid = self._volume_grid(source, self._volume_level(layer) or 1)
+            grid = self._volume_grid(source, self._volume_level(layer) or 1,
+                                     float(layer.get("body_smooth_vox") or 0.0),
+                                     layer.get("body_labels") or [])
+            traced = _outlines(layer.get("overlays"))
             actor, scales, warnings = vr.build_actor(
                 grid, layer, _fills(layer.get("overlays")), material,
-                reuse=reuse)
+                reuse=reuse, outlines=traced)
         except (OSError, ValueError, MemoryError, KeyError) as exc:
             self.warn(f"volume {layer.get('source')}: {exc}")
             return []
@@ -1001,7 +1230,60 @@ class RenderSession:
             self._record_scale(overlay, values)
         if actor is not reuse:
             pl.add_actor(actor, reset_camera=False)
+        # Framed on its tissue, not its field of view (see _frame_bounds).
+        self._framing[actor.GetAddressAsString("vtkObject")] = vr.tissue_bounds(grid)
+        # Outlines are traced over the finished frame (_draw_projections): on
+        # an x-rayed body, each region as seen through the brain; on a painted
+        # one, exactly the patches of the surface the region colours.
+        fills = _fills(layer.get("overlays"))
+        if not traced:
+            self._projections.pop(layer["id"], None)
+        elif vr._mode(layer, fills, traced) == "volume":
+            self._projections[layer["id"]] = self._projection_jobs(layer, grid, traced)
+        else:
+            self._projections[layer["id"]] = self._painted_jobs(
+                layer, grid, fills, traced, material)
         return [actor]
+
+    def _painted_jobs(self, layer, grid, fills, traced, material):
+        """``[(region volume, colour, opacity, width)]`` for a painted body:
+        the body drawn unlit, white where each outline overlay is, black
+        elsewhere -- a mask of what that overlay colours on screen."""
+        from circuit_viewer import volume_render as vr
+
+        jobs = []
+        for overlay in traced:
+            try:
+                actor = vr.region_actor(grid, layer, fills, overlay, material)
+            except (OSError, ValueError, MemoryError) as exc:
+                self.warn(f"outline {overlay.get('name') or overlay['nifti']}: {exc}")
+                continue
+            if actor is not None:
+                jobs.append((actor, *_outline_style(overlay)))
+        return jobs
+
+    def _projection_jobs(self, layer, grid, traced):
+        """``[(surface, colour, opacity, width)]``: each outline overlay's
+        region as a surface, cut where the body is cut, inside the body unless
+        overlays may go outside it."""
+        from circuit_viewer import outlines
+        from circuit_viewer import volume_render as vr
+
+        jobs = []
+        outside = bool(layer.get("overlay_outside"))
+        for overlay in traced:
+            try:
+                surface = outlines.region_surface(
+                    overlay, grid, outside,
+                    None if outside else vr.body_mask(grid))
+                surface = outlines.clip_to_section(surface, layer.get("section"))
+            except (OSError, ValueError, MemoryError) as exc:
+                self.warn(f"outline {overlay.get('name') or overlay['nifti']}: {exc}")
+                continue
+            if not surface.n_points:
+                continue
+            jobs.append((surface, *_outline_style(overlay)))
+        return jobs
 
     def _restyle_volume(self, pl, layer, material):
         """Update a volume layer in place when only its styling changed.
@@ -1017,13 +1299,15 @@ class RenderSession:
         layer_id = layer["id"]
         old = self._actors.get(layer_id) or []
         if layer.get("kind") != "volume" or not layer.get("source") \
-                or len(old) != 1:
+                or not old:
             return False
         self._drawing = layer_id
         self._layer_warnings.pop(layer_id, None)
+        for extra in old[1:]:
+            self._remove(pl, extra)
         actors = self._add_volume(pl, layer, material, reuse=old[0])
         if not actors or actors[0] is not old[0]:
-            pl.remove_actor(old[0], reset_camera=False, render=False)
+            self._remove(pl, old[0])
         self._actors[layer_id] = actors
         self._cull_map.pop(layer_id, None)
         return True
@@ -1042,7 +1326,32 @@ class RenderSession:
         except Exception:
             return None         # unreadable: drawing it says why
 
-    def _volume_grid(self, source, level=1):
+    def _frame_bounds(self, pl):
+        """What the camera fits to: every visible 3D prop's bounds, except that
+        a volume counts only its tissue. None when there is no volume, so a
+        scene without one frames exactly as VTK always has."""
+        import vtk
+
+        live, boxes = {}, []
+        for prop in list(pl.renderer.actors.values()):
+            if not isinstance(prop, vtk.vtkProp3D) or not prop.GetVisibility():
+                continue
+            address = prop.GetAddressAsString("vtkObject")
+            if address in self._framing:
+                live[address] = self._framing[address]
+                boxes.append(live[address])
+            else:
+                box = prop.GetBounds()
+                if box is not None and box[0] <= box[1]:
+                    boxes.append(tuple(box))
+        self._framing = live            # forget volumes no longer on screen
+        if not live:
+            return None
+        boxes = np.asarray(boxes, float)
+        return (boxes[:, 0].min(), boxes[:, 1].max(), boxes[:, 2].min(),
+                boxes[:, 3].max(), boxes[:, 4].min(), boxes[:, 5].max())
+
+    def _volume_grid(self, source, level=1, smooth_vox=0.0, labels=()):
         """Grids are cached on the path and level: re-reading one costs more
         than the rest of a frame, and a slider must not pay for it. Both levels
         of a large body stay cached, so toggling hi-res back is free."""
@@ -1052,14 +1361,15 @@ class RenderSession:
             stamp = os.path.getmtime(source)
         except OSError:
             stamp = 0.0
-        key = (str(source), int(level), stamp)
+        labels = tuple(sorted(int(v) for v in labels or ()))
+        key = (str(source), int(level), stamp, round(float(smooth_vox), 3), labels)
         if key in self._volume_grids:
             self._volume_grids[key] = self._volume_grids.pop(key)  # most recent
             return self._volume_grids[key]
         for old in [k for k in self._volume_grids if k[0] == key[0]
                     and k[2] != stamp]:
             del self._volume_grids[old]     # the file changed under us
-        self._volume_grids[key] = vr.load_grid(source, level)
+        self._volume_grids[key] = vr.load_grid(source, level, smooth_vox, labels)
         # Both levels of the body in use, and a couple of recent others.
         while len(self._volume_grids) > 4:
             del self._volume_grids[next(iter(self._volume_grids))]
@@ -1090,6 +1400,7 @@ class RenderSession:
             # array to every part is what produced "Array 'paint' has length
             # (28441) but a length of (14120) was expected" on any two-part
             # surface -- both hemispheres of a whole brain, painted per vertex.
+            wire_values = colours.get("edges")
             at = 0
             for name, part in parts.items():
                 store = part.cell_data if target == "cells" else part.point_data
@@ -1097,18 +1408,26 @@ class RenderSession:
                 # A mesh must never carry both, or VTK picks whichever it finds
                 # first and the lengths disagree.
                 other.pop("paint", None)
+                other.pop("edge_paint", None)
                 size = part.n_cells if target == "cells" else part.n_points
                 store["paint"] = (values if len(values) == size
                                   else values[at:at + size])
+                if wire_values is not None:
+                    store["edge_paint"] = (wire_values if len(wire_values) == size
+                                           else wire_values[at:at + size])
                 at += size
             scalars = "paint"
             rgb = colours["mode"] == "rgb"
             cmap, clim = colours.get("cmap"), colours.get("clim")
 
-        gradient = any(o.get("mode") == "vertex"
-                       for o in _fills(layer.get("overlays")))
+        fills = _fills(layer.get("overlays"))
+        gradient = any(o.get("mode") == "vertex" for o in fills)
         faceted = _auto(layer["faceted"], not gradient)
-        edges = _auto(layer["edges"], geom["region_set"] and not gradient)
+        edges = _edges_on(layer, geom, fills)
+        wire_paint = colours is not None and "edges" in colours
+        # Map-coloured edges are drawn even with the plain highlight off: the
+        # checkbox then only decides whether the UNMAPPED edges show.
+        edges = edges or wire_paint
         translucent = layer["opacity"] < 1.0
         # Only when asked. Inferring it from translucency meant a scene that
         # happened to be see-through started deleting the near hemisphere on its
@@ -1117,7 +1436,7 @@ class RenderSession:
         cullable = (set(parts) == {"L", "R"}
                     and bool(layer.get("cull_near_hemisphere")))
 
-        actors, culls = [], []
+        actors, culls, fill_actors = [], [], []
         for side, mesh in parts.items():
             actor = pl.add_mesh(
                 mesh, scalars=scalars, cmap=cmap, clim=clim, rgb=rgb,
@@ -1129,57 +1448,177 @@ class RenderSession:
                 show_scalar_bar=False, **material,
             )
             actors.append(actor)
+            fill_actors.append(actor)
             if edges:
                 # A separate wireframe actor, not add_mesh(show_edges=True):
                 # VTK multiplies the actor's opacity into its own edges, so a
                 # translucent mesh washes its wireframe out and there is no way
                 # to ask for a faint mesh under a crisp one. Two actors give the
                 # two opacities the independence the eye expects.
-                actors.append(pl.add_mesh(
-                    mesh, style="wireframe", color=layer["edge_color"],
-                    opacity=float(layer["edge_opacity"]),
-                    line_width=float(layer["edge_width"] or 0.6),
-                    lighting=False, show_scalar_bar=False,
-                ))
+                if wire_paint:
+                    # RGBA per vertex (or cell): the alpha carries both the
+                    # edge opacity and the maps' own, so the actor stays at 1.
+                    wire = pl.add_mesh(
+                        mesh, style="wireframe", scalars="edge_paint", rgb=True,
+                        line_width=float(layer["edge_width"] or 0.6),
+                        lighting=False, show_scalar_bar=False,
+                    )
+                else:
+                    wire = pl.add_mesh(
+                        mesh, style="wireframe", color=layer["edge_color"],
+                        opacity=float(layer["edge_opacity"]),
+                        line_width=float(layer["edge_width"] or 0.6),
+                        lighting=False, show_scalar_bar=False,
+                    )
+                self._track_line(wire, float(layer["edge_width"] or 0.6))
+                actors.append(wire)
             if cullable:
                 culls.append((side, actor))
-            for overlay in _outlines(layer.get("overlays")):
-                line_actor = self._add_outline(pl, mesh, overlay)
-                if line_actor is not None:
-                    actors.append(line_actor)
-                    if cullable:
-                        culls.append((side, line_actor))
         self._cull_map[layer["id"]] = culls
+        jobs = self._mesh_outline_jobs(layer, geom, parts, fill_actors)
+        if jobs:
+            self._projections[layer["id"]] = jobs
+        else:
+            self._projections.pop(layer["id"], None)
         return actors
 
-    def _add_outline(self, pl, mesh, overlay):
-        """Trace where ``overlay`` selects anything, as lines on ``mesh``.
+    def _mesh_outline_jobs(self, layer, geom, parts, fills):
+        """Outline jobs for a mesh layer: one per drawn piece per outlined
+        overlay, ``(piece, colour, opacity, width, actor)``.
 
-        Nothing is painted: the overlay's sign, absolute and threshold / max
-        decide what is inside exactly as they would for a fill, and the edge of
-        that region is drawn in the overlay's colour.
+        The outline is the edge of what the overlay COLOURS on this mesh: the
+        very per-vertex (or per-region) values the fill paints -- sampled,
+        smoothed along the surface, thresholded exactly as the fill is -- and,
+        on a sequential scale, only from the colour bar's minimum up. Each
+        piece carries that as a 0/1 field; it is drawn unlit off screen with
+        the frame's camera and the edge of the white is traced over the frame
+        (see _draw_projections), so the line sits exactly where the colour
+        starts, is hidden wherever the mesh hides it, and is ``width`` pixels.
+        ``actor`` is the piece's own fill actor: a piece culled from view
+        draws no outline.
         """
-        from calvin_utils.plotting_utils.mesh_paint import outline_lines
+        traced = _outlines(layer.get("overlays"))
+        if not traced:
+            return []
+        target = self._target(geom)
+        jobs = []
+        for overlay in traced:
+            try:
+                values = self._overlay_values(layer, geom, overlay)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                self.warn(f"outline {overlay.get('name') or overlay['nifti']}: {exc}")
+                continue
+            inside = _coloured(values, overlay)
+            if not (inside > 0.5).any():
+                continue
+            colour, opacity, width = _outline_style(overlay)
+            at = 0
+            for (name, part), actor in zip(parts.items(), fills):
+                size = part.n_cells if target == "cells" else part.n_points
+                share = inside if len(inside) == size else inside[at:at + size]
+                at += size
+                if not (share > 0.5).any():
+                    continue
+                if target == "points":
+                    # A light average along the surface, so the traced edge is
+                    # round rather than stepping from triangle to triangle.
+                    share = _surface_average(part, share, _OUTLINE_SMOOTH_MM)
+                piece = part.copy(deep=False)
+                piece.point_data.pop("paint", None)
+                piece.cell_data.pop("paint", None)
+                store = piece.cell_data if target == "cells" else piece.point_data
+                store["_inside"] = share
+                jobs.append((piece, colour, opacity, width, actor))
+        return jobs
 
-        try:
-            lines = outline_lines(
-                mesh, overlay["nifti"], sign=overlay["sign"],
-                absolute=overlay["absolute"], threshold=overlay["threshold"],
-                max_value=overlay.get("max_value"),
-                smooth_vox=overlay.get("outline_smooth", 1.0))
-        except (ValueError, FileNotFoundError, OSError) as exc:
-            self.warn(f"outline {overlay.get('name') or overlay['nifti']}: {exc}")
-            return None
-        if not lines.n_points:
-            return None
-        return pl.add_mesh(lines, color=overlay["color"],
-                           opacity=float(overlay.get("opacity", 1.0)),
-                           line_width=float(overlay.get("outline_width", 3.0)),
-                           render_lines_as_tubes=True, lighting=False,
-                           show_scalar_bar=False)
+    def _remove(self, pl, actor):
+        pl.remove_actor(actor, reset_camera=False, render=False)
+
+    def _track_line(self, actor, width):
+        """Remember an outline actor's width in screen pixels; it is scaled
+        with the render's supersampling at draw time."""
+        self._lines[actor.GetAddressAsString("vtkObject")] = (actor, width)
+
+    def _style_lines(self, pl):
+        """Before a frame: outline widths for this render's supersampling.
+        Forgets actors no longer drawn."""
+        live = {a.GetAddressAsString("vtkObject")
+                for a in pl.renderer.actors.values()}
+        self._lines = {k: v for k, v in self._lines.items() if k in live}
+        # VTK's SSAA pass draws at twice the size and scales down, which
+        # halves every line's width in an export (measured: 4 px -> 2 px), so
+        # the width it is given is doubled to come out as asked.
+        scale = (max(self._font_scale, 1) * self._line_scale
+                 * (2 if self._supersampled() else 1))
+        for actor, width in self._lines.values():
+            actor.GetProperty().SetLineWidth(width * scale)
+
+    def _supersampled(self):
+        """Whether VTK draws this frame at twice the size and shrinks it: SSAA,
+        and FXAA on an EGL/OSMesa build, where pyvista quietly swaps FXAA for
+        SSAA -- without this, hi-res lines came out at half width there."""
+        aa = getattr(self, "_antialias", None)
+        if aa == "ssaa":
+            return True
+        if aa == "fxaa":
+            try:
+                from pyvista.plotting.utilities.gl_checks import uses_egl
+
+                return bool(uses_egl())
+            except Exception:
+                return False
+        return False
+
+    def _draw_projections(self, pl, image):
+        """Outlines of mesh and volume overlays, laid over a finished frame:
+        each region drawn alone with this frame's camera, and a line centred
+        on its edges drawn on the image (see outlines.py)."""
+        from circuit_viewer import outlines
+
+        visible = {layer["id"] for layer in self.spec["layers"]
+                   if layer.get("visible", True)}
+        jobs = [job for layer_id, items in self._projections.items()
+                if layer_id in visible and layer_id in self._actors
+                for job in items]
+        if not jobs:
+            # Nothing outlined any more: let the off-screen renderer drop the
+            # region volumes and surfaces it was holding (otherwise kept until
+            # the next outline appeared -- a whole body's voxels for a volume).
+            if self._projector is not None and self._projector._pl is not None:
+                self._projector.keep_only([])
+            return image
+        if self._projector is None:
+            self._projector = outlines.Projector()
+        if self._projector._pl is not None:
+            self._projector.keep_only([job[0] for job in jobs])
+        size = (image.shape[1], image.shape[0])
+        camera = pl.renderer.GetActiveCamera()
+        import pyvista as pv
+
+        for job in jobs:
+            thing, colour, opacity, width = job[:4]
+            if len(job) > 4 and not job[4].GetVisibility():
+                continue                    # its piece is culled from view
+            # A region volume is a full body render: half size while working.
+            scale = (0.5 if self._quality != "export"
+                     and not isinstance(thing, pv.DataSet) else 1.0)
+            try:
+                mask = self._projector.mask(camera, size, thing, scale)
+            except Exception as exc:        # an outline must never cost the frame
+                self.warn(f"outline: {exc}")
+                continue
+            image = outlines.draw_outline(image, mask, colour, opacity,
+                                          width * max(self._font_scale, 1)
+                                          * self._line_scale)
+        return image
 
     def backdrop(self, reference):
-        """An open Backdrop, kept for the session so slices stay ~1 ms reads."""
+        """An open Backdrop, kept for the session so slices stay ~1 ms reads.
+
+        A prepared ``.npz`` is read slice by slice from disk. A NIfTI -- one
+        dropped on + Slices or opened as a temporary backdrop -- is read once
+        and held in memory, 8-bit, by ``_nifti_backdrop``: nothing is written.
+        """
         from calvin_utils.plotting_utils.backdrops import BACKDROP_DIR, Backdrop
 
         text = str(reference)
@@ -1188,20 +1627,24 @@ class RenderSession:
             path = Path(BACKDROP_DIR).expanduser() / f"{text}.npz"
         key = str(path)
         if key not in self._backdrops:
-            self._backdrops[key] = Backdrop(path)
+            if text.lower().endswith((".nii", ".nii.gz")):
+                self._backdrops[key] = _nifti_backdrop(path)
+            else:
+                self._backdrops[key] = Backdrop(path)
+            # Temporary backdrops are whole volumes in memory; keep a few.
+            while len(self._backdrops) > 6:
+                self._backdrops.pop(next(iter(self._backdrops)))
         return self._backdrops[key]
 
     def _add_slices(self, pl, layer):
         if not layer.get("backdrop"):
             return []                   # a freshly added layer has no volume yet
-        if _outlines(layer.get("overlays")):
-            self.warn("outline overlays are drawn on mesh layers only; "
-                      "skipped on this slice layer")
         back = self.backdrop(layer["backdrop"])
         lo, hi = back.bounds()
         middle = (lo + hi) / 2.0
         actors = []
         state = {}
+        traced = _outlines(layer.get("overlays"))
 
         for axis, key in enumerate(("x", "y", "z")):
             if not layer.get(f"show_{key}", True):
@@ -1222,9 +1665,39 @@ class RenderSession:
                                 opacity=float(layer["opacity"]),
                                 show_scalar_bar=False)
             actors.append(actor)
-            state[axis] = [quad, actor, float(wanted)]
+            lines = []
+            for overlay in traced:
+                line = self._slice_outline(pl, back, axis, float(wanted), overlay)
+                if line is not None:
+                    actors.append(line)
+                    lines.append((overlay, line))
+            state[axis] = [quad, actor, float(wanted), lines]
         self._slice_state[layer["id"]] = state
         return actors
+
+    def _slice_outline(self, pl, back, axis, world_mm, overlay, actor=None):
+        """An overlay's outline on one slice plane: a new line actor, or
+        ``actor`` re-pointed at the plane's new position."""
+        from circuit_viewer import outlines
+
+        try:
+            poly = outlines.plane_outline(back, axis, back.index_for(axis, world_mm),
+                                          overlay)
+        except (OSError, ValueError, MemoryError) as exc:
+            self.warn(f"outline {overlay.get('name') or overlay['nifti']}: {exc}")
+            return actor
+        if actor is not None:
+            actor.GetMapper().SetInputData(poly)
+            return actor
+        colour, opacity, width = _outline_style(overlay)
+        from matplotlib.colors import to_rgb
+
+        actor = _line_actor(poly)
+        actor.GetProperty().SetColor(*to_rgb(colour))
+        actor.GetProperty().SetOpacity(opacity)
+        pl.add_actor(actor, reset_camera=False)
+        self._track_line(actor, width)
+        return actor
 
     def _electrode_geometry(self, layer):
         """``{part name: PolyData}`` for a lead, already placed on the patient.
@@ -1278,6 +1751,8 @@ class RenderSession:
 
         key = _key(layer, _FIBER_KEYS)
         entry = self._fibers.get(key)
+        if entry is not None:
+            self._fibers.move_to_end(key)
         if entry is None:
             poly = load_fibers(
                 layer["source"],
@@ -1614,8 +2089,9 @@ class RenderSession:
         return self._gl.submit(self._render, *args, **kwargs).result()
 
     def _render(self, size=(760, 640), quality="preview", scalar_bar=True,
-                camera=None, antialias=None):
+                camera=None, antialias=None, line_scale=1.0):
         size = (int(size[0]), int(size[1]))
+        self._line_scale = max(float(line_scale or 1.0), 0.1)
         if antialias is None:
             antialias = "ssaa" if quality == "export" else "off"
         # VTK's SSAA pass drops ray-cast volumes -- measured: a body that
@@ -1656,6 +2132,7 @@ class RenderSession:
 
     def _compose(self, pl, size, quality, scalar_bar, camera, antialias):
         self._quality = quality
+        self._antialias = antialias
         self._sync_actors(pl)
 
         cam = dict(self.spec["camera"], **(camera or {}))
@@ -1678,7 +2155,8 @@ class RenderSession:
         # honest choice for a figure someone will measure by eye: two regions
         # the same size render the same size whatever their depth.
         pl.camera.parallel_projection = bool(self.spec.get("parallel", True))
-        pl.renderer.reset_camera(render=False)
+        pl.renderer.reset_camera(render=False, bounds=self._frame_bounds(pl))
+        self._style_lines(pl)
         pl.camera.zoom(float(cam["zoom"]))
         # A fixed framing in millimetres (half the view's height), for figures
         # that put several views side by side: fitting each view to its own
@@ -1775,12 +2253,14 @@ class RenderSession:
         pl.suppress_rendering = False
         pl.render()
         image = pl.screenshot(return_img=True)
+        image = self._draw_projections(pl, image)
         return _png(image, fast=quality != "export")
 
-    def export(self, path, size=(1700, 1400), scalar_bar=True, camera=None):
+    def export(self, path, size=(1700, 1400), scalar_bar=True, camera=None,
+               line_scale=1.0):
         Path(path).expanduser().write_bytes(
             self.render(size=size, quality="export", scalar_bar=scalar_bar,
-                        camera=camera, antialias="ssaa")
+                        camera=camera, antialias="ssaa", line_scale=line_scale)
         )
         return str(Path(path).expanduser())
 
