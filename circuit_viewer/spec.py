@@ -264,8 +264,11 @@ ELECTRODE_LAYER = {
     "kind": "electrode",
     "name": "Electrode",
     "visible": True,
-    "source": None,           # ea_reconstruction.mat, a model .mat, or JSON
-    "model": None,            # override the model the reconstruction names
+    "source": None,           # ea_reconstruction.mat, a model .mat, or JSON; None for a model alone
+    # A model's name in resources/electrodes ("boston_vercise_directed") or a
+    # model .mat path: with a source, it replaces the model the reconstruction
+    # names; without one, it is the lead drawn.
+    "model": None,
     "insulation_color": "#d4d6da",
     "contact_color": "#43484f",
     "opacity": 1.0,

@@ -30,6 +30,7 @@ from .spec import (
 STATIC = Path(__file__).resolve().parent / "static"
 MESH_SUFFIXES = {".vtk", ".vtp", ".stl", ".ply", ".obj", ".gii"}
 VOLUME_SUFFIXES = {".nii", ".gz", ".npz"}
+LABEL_SUFFIXES = {".txt", ".lut", ".csv", ".tsv", ".json"}     # region-name tables (volume_meshes.read_label_table)
 FIBER_SUFFIXES = {".mat", ".npy", ".tck", ".trk", ".json"}
 
 
@@ -165,9 +166,17 @@ def create_app(spec=None, drop_dir=None):
         from .session import ELECTRODE_MODEL_DIR
 
         try:
-            return jsonify(electrode_poses(request.args["source"], ELECTRODE_MODEL_DIR, model=request.args.get("model") or None))
+            return jsonify(electrode_poses(request.args.get("source") or None, ELECTRODE_MODEL_DIR, model=request.args.get("model") or None))
         except Exception as exc:
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/electrode/models")
+    def api_electrode_models():
+        """The lead models shipped with the viewer, for the Lead model picker."""
+        from calvin_utils.plotting_utils.electrode_render import available_models
+        from .session import ELECTRODE_MODEL_DIR
+
+        return jsonify(available_models(ELECTRODE_MODEL_DIR))
 
     @app.get("/api/layer/<kind>")
     def api_new_layer(kind):
@@ -324,6 +333,18 @@ def create_app(spec=None, drop_dir=None):
             return jsonify(start(body["path"],
                                  mm=None if mm in (None, "", 0) else float(mm),
                                  name=body.get("name")))
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/atlases")
+    def api_build_atlas():
+        """Start meshing an atlas into the prepared-atlas library. It returns at
+        once and is polled on the same job endpoint as a backdrop conversion."""
+        from .backdrop_jobs import start_atlas
+
+        body = request.get_json(force=True)
+        try:
+            return jsonify(start_atlas(body["path"], body.get("name"), table=body.get("table") or None))
         except Exception as exc:
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
 
@@ -540,7 +561,7 @@ def create_app(spec=None, drop_dir=None):
             return jsonify({"error": f"{root} is not a directory"}), 400
         want = request.args.get("kind", "any")
         suffixes = {"mesh": MESH_SUFFIXES, "volume": VOLUME_SUFFIXES,
-                    "fibers": FIBER_SUFFIXES}.get(want)
+                    "fibers": FIBER_SUFFIXES, "labels": LABEL_SUFFIXES}.get(want)
 
         entries = []
         try:

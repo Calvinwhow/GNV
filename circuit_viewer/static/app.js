@@ -27,12 +27,22 @@ async function renderSettled(quality){
 }
 
 /* ---------- server ---------- */
-async function getJSON(u){ const r = await fetch(u); const j = await r.json();
-  if (!r.ok) throw new Error(j.error || r.statusText); return j; }
+/* The server answers JSON; anything else is its HTML error page (a route the
+ * running server does not have -- one started before an update -- or a crash),
+ * reported as what it is rather than as a JSON parse error. */
+async function readJSON(r, u){
+  const text = await r.text();
+  let j;
+  try { j = JSON.parse(text); }
+  catch (e) { throw new Error(`${u.split('?')[0]}: the server answered ${r.status} ${r.statusText}, not data` + (r.status === 404 ? ' — restart the viewer if it was updated while running' : '')); }
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+async function getJSON(u){ return readJSON(await fetch(u), u); }
 async function postJSON(u, body){
   const r = await fetch(u, {method:'POST', headers:{'Content-Type':'application/json'},
                             body: JSON.stringify(body)});
-  const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText); return j;
+  return readJSON(r, u);
 }
 function status(msg, err){ const s = $('#status'); s.textContent = msg; s.classList.toggle('err', !!err); }
 
@@ -587,16 +597,22 @@ function meshBody(b, L, set){
   const opts = [...(groups.surface || []), ...(groups.parcels || [])];
   const vol = isVolume(L.mesh);
 
-  /* Geometry comes either from a mesh that already exists or from a volume we
-   * surface here. One field holds both, because downstream nothing else cares. */
-  field(b, 'Geometry', select(
-    [{value:'mesh', label:'built-in mesh'}, {value:'volume', label:'a NIfTI volume'}],
-    vol ? 'volume' : 'mesh',
-    v => set('mesh', v === 'volume' ? '' : 'pial_wholebrain')));
+  /* One list: the built-in meshes and every prepared atlas. Anything else the
+   * layer holds -- a NIfTI dropped on it, surfaced on the fly -- shows as
+   * itself at the top; picking from the list replaces it. */
+  const known = opts.some(o => o.value === L.mesh);
+  const current = L.mesh && !known ? [{value: L.mesh, label: (vol ? 'NIfTI — ' : '') + String(L.mesh).replace(/\/+$/, '').split('/').pop()}] : [];
+  field(b, 'Mesh', select([...current, ...opts], L.mesh, v => set('mesh', v)));
+  const convert = el('button', null, 'Convert atlas …');
+  convert.title = 'mesh an atlas once into a prepared region set, kept in the Mesh list for every figure';
+  convert.onclick = () => convertAtlas(set);
+  field(b, '', convert);
+  b.appendChild(el('div', 'hint',
+    'Convert atlas takes a 4D NIfTI (one region per volume), a 3D label NIfTI ' +
+    '(one region per value), or a folder of NIfTIs (one region per file), and an ' +
+    'optional .txt / .lut naming the regions.'));
 
-  if (!vol){
-    field(b, 'Mesh', select(opts, L.mesh, v => set('mesh', v)));
-  } else {
+  if (vol){
     /* Prepared backdrops first: they are already resampled and quantised, so
      * they mesh in seconds and can colour themselves. Any other NIfTI still
      * works through the path field below. */
@@ -1075,6 +1091,29 @@ function atlasRegions(b, L, set){
 
 let CONVERT_DONE = null;   // what to do with a finished conversion, if anything
 
+/* Convert atlas: pick a 4D or label NIfTI, or a folder of NIfTIs; then,
+ * optionally, the table that names its regions; then a name for the list. The
+ * conversion runs as a job (backdrop_jobs.start_atlas) and the layer switches
+ * to the new atlas when it is ready. */
+function convertAtlas(set){
+  chooseFile('volume', $('#m-path').value, source => {
+    const folder = !isVolume(source);
+    const stem = source.replace(/\/+$/, '').split('/').pop().replace(/\.nii(\.gz)?$/i, '');
+    const ask = folder
+      ? 'Name the regions from a .txt or .lut table?\n\nOK to choose one. Cancel to name each region after its file.'
+      : 'Name the regions from a .txt or .lut table? (strongly recommended)\n\nOK to choose one. Cancel to use the file\'s own sidecar table if it has one, or numbered names.';
+    const go = table => {
+      const name = prompt('Name for the prepared atlas, as it will appear in the Mesh list:', stem);
+      if (!name) return;
+      postJSON('/api/atlases', {path: source, name, table})
+        .then(() => { CONVERT_DONE = n => set('mesh', n); pollConvert(); })
+        .catch(e => status(e.message, true));
+    };
+    if (confirm(ask)) chooseFile('labels', folder ? source : source.replace(/\/[^/]*$/, ''), go);
+    else go(null);
+  }, {folder: true, title: 'Choose a 4D or label NIfTI, or a folder of NIfTIs'});
+}
+
 async function startConvert(path, onDone){
   const answer = prompt(
     'Resolution in mm.\n\n' +
@@ -1094,10 +1133,18 @@ async function startConvert(path, onDone){
 async function pollConvert(){
   try {
     const j = await getJSON('/api/backdrops/job');
-    if (j.error){ status(j.error, true); return; }
+    if (j.error){ CONVERT_DONE = null; status(j.error, true); return; }
     if (j.running){
       status(`converting ${j.name} … ${(j.progress*100).toFixed(0)}%`);
       setTimeout(pollConvert, 1200); return;
+    }
+    if (j.kind === 'atlas'){
+      CAT = await getJSON('/api/catalogue');
+      const small = (j.skipped || []).length;
+      status('ready: ' + j.name + (small ? ` · ${small} region(s) too small to mesh: ${j.skipped.join(', ')}` : ''));
+      const done = CONVERT_DONE; CONVERT_DONE = null;
+      if (done) done(j.name);
+      drawLayers(); return;
     }
     await refreshBackdrops();
     await refreshVolumes();
@@ -1110,20 +1157,47 @@ async function pollConvert(){
 
 function electrodeBody(b, L, set){
   pathField(b, 'Reconstruction', L.source, 'fibers', v => set('source', v));
-  pathField(b, 'Model (optional)', L.model, 'fibers', v => set('model', v));
+  field(b, 'Lead model', modelPicker(L, v => set('model', v || null)));
   field(b, 'Insulation', colour(L.insulation_color, v => set('insulation_color', v)));
   field(b, 'Contacts', colour(L.contact_color, v => set('contact_color', v)));
   const op = el('input'); op.type='range'; op.min=0; op.max=1; op.step=0.02;
   op.value = L.opacity; op.oninput = () => set('opacity', parseFloat(op.value));
   field(b, 'Opacity', op);
   b.appendChild(el('div','hint',
-    'A Lead-DBS reconstruction places the lead from its four markers — head, ' +
-    'tail, x and y — so the segmented contacts of a directed lead land on the ' +
-    'right side. Drop an ea_reconstruction.mat, or a model .mat to see a lead ' +
-    'at its own template position. Leave Model empty to use the one the ' +
-    'reconstruction names.'));
+    'Pick a Lead model to draw that lead on its own, then place it with ' +
+    'Orientation — the way to build a hypothetical figure. Or drop a Lead-DBS ' +
+    'reconstruction (ea_reconstruction.mat or its .json): it places each lead ' +
+    'from its four markers, so the segmented contacts of a directed lead land ' +
+    'on the right side, and Lead model then defaults to the one it names.'));
 
-  if (L.source) orientationEditor(b, L, set);
+  if (L.source || L.model) orientationEditor(b, L, set);
+}
+
+/* The models shipped with the viewer, grouped by maker (the first word of
+ * the name). Read once; a model saved as a file path rather than a name
+ * still shows, by its file name. */
+let ELECTRODE_MODELS = null;
+function modelPicker(L, onchange){
+  const s = el('select');
+  const fill = models => {
+    s.innerHTML = '';
+    const none = el('option', null, L.source ? 'as the reconstruction names' : '— choose a lead —');
+    none.value = ''; s.appendChild(none);
+    const groups = {};
+    models.forEach(m => {
+      const maker = m.label.split(' ')[0];
+      if (!groups[maker]){ groups[maker] = el('optgroup'); groups[maker].label = maker; s.appendChild(groups[maker]); }
+      const o = el('option', null, m.label); o.value = m.value; groups[maker].appendChild(o);
+    });
+    if (L.model && !models.some(m => m.value === L.model)){
+      const o = el('option', null, String(L.model).split('/').pop()); o.value = L.model; s.appendChild(o);
+    }
+    s.value = L.model || '';
+  };
+  s.onchange = () => onchange(s.value);
+  if (ELECTRODE_MODELS) fill(ELECTRODE_MODELS);
+  else getJSON('/api/electrode/models').then(m => { ELECTRODE_MODELS = m; fill(m); }).catch(e => status(e.message, true));
+  return s;
 }
 
 /* ---------- electrode orientation ----------
@@ -1157,7 +1231,8 @@ function orientationEditor(b, L, set){
   const outer = foldFor(b, 'Orientation', L.id, L.poses && Object.keys(L.poses).length);
   const body = outer.body;
   body.appendChild(el('div', 'hint', 'reading the leads …'));
-  const q = new URLSearchParams({source: L.source});
+  const q = new URLSearchParams();
+  if (L.source) q.set('source', L.source);
   if (L.model) q.set('model', L.model);
   getJSON('/api/electrode/poses?' + q).then(fromFile => {
     body.innerHTML = '';
@@ -1430,7 +1505,7 @@ const FILL_PASSES = 3;
 
 /* Fields that change which controls a panel shows, so editing them rebuilds
  * it: a volume's body (its size hints and levels button). */
-const RESTRUCTURE = new Set(['coloring', 'mesh', 'backdrop', 'source']);
+const RESTRUCTURE = new Set(['coloring', 'mesh', 'backdrop', 'source', 'model']);
 
 const LIGHT_CONTROLS = [
   ['key_azimuth',    'Key azimuth',   -180, 180, 1],
@@ -1846,7 +1921,7 @@ dropTarget($('#ng-electrode'), dropAsNewElectrode);
 dropTarget($('#stage'), dropAsNewGroup);
 
 /* ---------- file chooser ---------- */
-let chooserResolve = null;
+let chooserResolve = null, chooserKind = 'any';
 async function browse(path, kind){
   const j = await getJSON('/api/browse?' + new URLSearchParams({path: path || '', kind}));
   $('#m-path').value = j.path;
@@ -1860,23 +1935,27 @@ async function browse(path, kind){
   });
   $('#m-up').onclick = () => browse(j.parent, kind);
 }
-function chooseFile(kind, start, cb){
-  chooserResolve = cb;
-  $('#m-title').textContent = {volume:'Choose a NIfTI', fibers:'Choose a fiber file',
-                               save:'Save as', mesh:'Choose a mesh'}[kind] || 'Choose a file';
+/* ``folder`` adds "Use this folder", which answers with the folder shown. */
+function chooseFile(kind, start, cb, {folder = false, title = null} = {}){
+  chooserResolve = cb; chooserKind = kind;
+  $('#m-title').textContent = title || {volume:'Choose a NIfTI', fibers:'Choose a fiber file',
+                               save:'Save as', mesh:'Choose a mesh',
+                               labels:'Choose a .txt or .lut naming the regions'}[kind] || 'Choose a file';
+  $('#modal').classList.toggle('pick-many', folder);
   $('#m-name').value = '';
   $('#modal').classList.add('on');
   browse(start, kind).catch(e => status(e.message, true));
 }
 function finishChoose(path){
-  $('#modal').classList.remove('on');
+  $('#modal').classList.remove('on', 'pick-many');
   const cb = chooserResolve; chooserResolve = null;
   if (cb) cb(path);
 }
-$('#m-cancel').onclick = () => { $('#modal').classList.remove('on'); chooserResolve = null; };
+$('#m-cancel').onclick = () => { $('#modal').classList.remove('on', 'pick-many'); chooserResolve = null; };
+$('#m-folder').onclick = () => finishChoose($('#m-path').value);
 $('#m-ok').onclick = () => { const v = $('#m-name').value.trim();
   if (v) finishChoose(v.includes('/') ? v : ($('#m-path').value + '/' + v)); };
-$('#m-path').onchange = () => browse($('#m-path').value, 'any').catch(e => status(e.message, true));
+$('#m-path').onchange = () => browse($('#m-path').value, chooserKind).catch(e => status(e.message, true));
 
 /* ---------- orbit, pan, zoom ----------
  * Left-drag orbits. Right-drag, middle-drag or shift-drag pans: the camera and

@@ -420,11 +420,32 @@ def catalogue():
             "group": "parcels" if region_set else "surface",
             "available": bool(available),
         })
+    # Atlases converted here (backdrop_jobs.start_atlas): region sets too.
+    for directory in prepared_atlases():
+        try:
+            about = json.loads((directory / "atlas.json").read_text())
+        except (OSError, ValueError):
+            about = {}
+        meshes.append({
+            "name": directory.name,
+            "what": f"[prepared] {about.get('regions', '?')} region meshes, from {Path(str(about.get('source', '?'))).name}" + (f"; {len(about['skipped'])} too small to mesh" if about.get("skipped") else ""),
+            "group": "parcels",
+            "available": True,
+        })
     return {"meshes": meshes,
             "stats": ["max", "mean_nonzero", "mean", "min", "sum"],
             "signs": ["both", "positive", "negative"],
             "modes": ["region", "vertex"],
             "colorings": ["solid", "direction", "value"]}
+
+
+def prepared_atlases():
+    """The folders in the prepared-atlas library, by name."""
+    from .paths import ATLAS_DIR
+
+    if not ATLAS_DIR.is_dir():
+        return []
+    return sorted(p for p in ATLAS_DIR.iterdir() if p.is_dir() and not p.name.startswith("."))
 
 
 # A prepared backdrop counts as a volume everywhere a volume is accepted, so
@@ -493,6 +514,11 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
                 "downloaded into its cache the first time yabplot draws them."
             )
         return load_parcels(directory)
+    if spec is None:
+        from .paths import ATLAS_DIR
+
+        if (ATLAS_DIR / text).is_dir():
+            return load_parcels(ATLAS_DIR / text)
     if spec is not None:
         from calvin_utils.plotting_utils.brains import mesh_pieces
         from calvin_utils.plotting_utils.glass_mesh import build_bmesh
@@ -1198,8 +1224,8 @@ class RenderSession:
                 return []
             return self._add_fibers(pl, layer, material)
         if layer["kind"] == "electrode":
-            if not layer.get("source"):
-                return []
+            if not layer.get("source") and not layer.get("model"):
+                return []           # a fresh electrode layer, still on its picker
             return self._add_electrode(pl, layer, material)
         if not layer.get("mesh"):
             return []           # a fresh mesh layer, still on its picker
