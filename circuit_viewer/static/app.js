@@ -1122,6 +1122,107 @@ function electrodeBody(b, L, set){
     'right side. Drop an ea_reconstruction.mat, or a model .mat to see a lead ' +
     'at its own template position. Leave Model empty to use the one the ' +
     'reconstruction names.'));
+
+  if (L.source) orientationEditor(b, L, set);
+}
+
+/* ---------- electrode orientation ----------
+ * One trajectory per lead (electrode_render.pose_markers), set the way a
+ * stereotactic frame is: the tip's x/y/z in world mm, then three angles in
+ * degrees, each on the unit circle of its anatomical plane -- the shaft seen
+ * from the side (sagittal: 0 nose, 90 up), the shaft seen from the front
+ * (coronal: 0 right ear, 90 up), and the lead's marker seen from above
+ * (marker: 0 right ear, 90 nose). Each lead starts where its file puts it;
+ * Reset returns it there. */
+const LEAD_NAMES = {R: 'Right lead', L: 'Left lead', '': 'Lead'};
+const OTHER_SIDE = {R: 'L', L: 'R'};
+/* Which orientation folds are open, by layer and lead: a mirror click redraws
+ * the panel, and the folds must not snap shut under the cursor. */
+const ORIENT_OPEN = {};
+function foldFor(parent, title, key, startOpen){
+  const d = el('details', 'fold');
+  const sum = el('summary', null, title);
+  d.appendChild(sum);
+  d.open = key in ORIENT_OPEN ? ORIENT_OPEN[key] : !!startOpen;
+  d.ontoggle = () => { ORIENT_OPEN[key] = d.open; };
+  const body = el('div'); d.appendChild(body); parent.appendChild(d);
+  return {fold: d, body, summary: sum};
+}
+/* A pose reflected across the midline, as electrode_render.mirror_pose does:
+ * used only so a lead taking over as the leader keeps the pose it was shown in. */
+function mirroredPose(p){
+  return {tip: [-p.tip[0], p.tip[1], p.tip[2]], sagittal: p.sagittal, coronal: 180 - p.coronal, marker: ((180 - p.marker) % 360 + 360) % 360};
+}
+function orientationEditor(b, L, set){
+  const outer = foldFor(b, 'Orientation', L.id, L.poses && Object.keys(L.poses).length);
+  const body = outer.body;
+  body.appendChild(el('div', 'hint', 'reading the leads …'));
+  const q = new URLSearchParams({source: L.source});
+  if (L.model) q.set('model', L.model);
+  getJSON('/api/electrode/poses?' + q).then(fromFile => {
+    body.innerHTML = '';
+    const sides = Object.keys(fromFile).sort().reverse();       // R before L
+    const poseOf = side => (L.poses || {})[side] || fromFile[side];
+    sides.forEach(side => {
+      const name = LEAD_NAMES[side] ?? ('Lead ' + side);
+      const follows = L.mirror != null && OTHER_SIDE[L.mirror] === side;
+      const title = follows ? name + ' — mirrors the ' + (LEAD_NAMES[L.mirror] || 'other lead').toLowerCase() : name;
+      const lead = foldFor(body, title, L.id + ':' + side, sides.length === 1);
+      /* Mutually exclusive across the leads: ticking one side makes it the
+       * leader and the other its mirror image; ticking the follower hands the
+       * lead over, keeping the pose it is shown in so nothing jumps. */
+      const single = OTHER_SIDE[side] === undefined;
+      const tick = el('input'); tick.type = 'checkbox'; tick.checked = L.mirror === side;
+      tick.title = single ? 'draw a mirrored copy of this lead on the other side of the midline (x = 0)' : 'mirror this lead onto the other side of the midline (x = 0); the other lead follows it';
+      tick.onchange = () => {
+        if (!tick.checked){ set('mirror', null); drawLayers(); return; }
+        if (follows) L.poses = Object.assign({}, L.poses, {[side]: mirroredPose(poseOf(L.mirror))});
+        set('poses', L.poses || {});
+        set('mirror', side); drawLayers();
+      };
+      field(lead.body, single ? 'Mirrored copy' : 'Mirror to other side', tick);
+      if (follows){
+        lead.body.appendChild(el('div', 'hint', 'Follows the ' + (LEAD_NAMES[L.mirror] || 'other lead').toLowerCase() + ', reflected across the midline. Tick Mirror here to steer this lead instead.'));
+        return;
+      }
+      leadPose(lead.body, L, set, side, fromFile[side]);
+    });
+    body.appendChild(el('div', 'hint',
+      'Tip is the lead\'s deepest point (x right, y anterior, z superior). Each ' +
+      'angle is read on the unit circle of one plane, as the direction of a shadow. ' +
+      'Sagittal: the shaft seen from the side (0 toward the nose, 90 straight up, ' +
+      '180 toward the back). Coronal: the shaft seen from the front (0 toward the ' +
+      'right ear, 90 straight up, 180 toward the left ear). Marker: the lead\'s ' +
+      'marker seen from above (0 right ear, 90 nose, 180 left ear, 270 back) -- on ' +
+      'Boston and Abbott directed leads, the band and first segment. Marker is ' +
+      'Lead-DBS\'s orientation angle plus 90. Mirror reflects a lead across the ' +
+      'midline onto the other side.'));
+  }).catch(e => { body.innerHTML = ''; body.appendChild(el('div', 'hint', 'could not read the leads: ' + e.message)); });
+}
+function leadPose(body, L, set, side, fromFile){
+  const pose = JSON.parse(JSON.stringify((L.poses || {})[side] || fromFile));
+  const commit = () => { L.poses = Object.assign({}, L.poses, {[side]: JSON.parse(JSON.stringify(pose))}); set('poses', L.poses); };
+  const tip = el('div', 'grow inline');
+  ['x, mm (right +)', 'y, mm (anterior +)', 'z, mm (superior +)'].forEach((title, i) => {
+    const n = el('input'); n.type = 'number'; n.step = 0.5; n.value = pose.tip[i]; n.title = title;
+    n.onchange = () => { pose.tip[i] = parseFloat(n.value) || 0; commit(); };
+    tip.appendChild(n);
+  });
+  field(body, 'Tip (mm)', tip);
+  [['sagittal', 'Sagittal (deg)', 1, 179], ['coronal', 'Coronal (deg)', 1, 179], ['marker', 'Marker (deg)', 0, 360]].forEach(([key, label, lo, hi]) => {
+    const box = el('div', 'grow inline');
+    const r = el('input'); r.type = 'range'; r.min = lo; r.max = hi; r.step = 1; r.value = pose[key];
+    const n = el('input'); n.type = 'number'; n.min = lo; n.max = hi; n.step = 1; n.value = Math.round(pose[key] * 10) / 10;
+    n.style.cssText = 'width:64px;flex:0 0 64px';
+    r.oninput = () => { pose[key] = parseFloat(r.value); n.value = r.value; commit(); };
+    n.onchange = () => { pose[key] = parseFloat(n.value) || 0; r.value = pose[key]; commit(); };
+    box.append(r, n);
+    field(body, label, box);
+  });
+  const reset = el('button', null, 'Reset to file');
+  reset.title = 'put this lead back where its file places it';
+  reset.onclick = () => { const next = Object.assign({}, L.poses); delete next[side]; L.poses = next; set('poses', next); drawLayers(); };
+  body.appendChild(reset);
 }
 
 /* ---------- pruning ----------

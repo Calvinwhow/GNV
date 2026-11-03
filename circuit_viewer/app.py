@@ -157,6 +157,18 @@ def create_app(spec=None, drop_dir=None):
         except SpecError as exc:
             return jsonify({"error": str(exc)}), 400
 
+    @app.get("/api/electrode/poses")
+    def api_electrode_poses():
+        """Each lead's trajectory as its file places it: what the orientation
+        controls start from, and what Reset returns to."""
+        from calvin_utils.plotting_utils.electrode_render import electrode_poses
+        from .session import ELECTRODE_MODEL_DIR
+
+        try:
+            return jsonify(electrode_poses(request.args["source"], ELECTRODE_MODEL_DIR, model=request.args.get("model") or None))
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
     @app.get("/api/layer/<kind>")
     def api_new_layer(kind):
         makers = {"mesh": (new_mesh_layer, "Mesh"),

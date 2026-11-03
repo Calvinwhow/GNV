@@ -270,6 +270,15 @@ ELECTRODE_LAYER = {
     "contact_color": "#43484f",
     "opacity": 1.0,
     "hidden_regions": [],     # part names, so one contact can be dropped
+    # Per-lead trajectory, {side: {tip: [x, y, z], sagittal, coronal, marker}} in
+    # world mm and degrees, each angle on the unit circle of its plane (see
+    # electrode_render.pose_markers). A lead not listed sits where its file puts
+    # it; "R"/"L" for a reconstruction, "" for a bare model.
+    "poses": {},
+    # Mirror across the midline (x = 0): the side the other lead follows -- "R"
+    # or "L" for a reconstruction, "" to give a bare model a mirrored copy.
+    # None for off. See electrode_render.mirror_pose.
+    "mirror": None,
 }
 
 
@@ -402,6 +411,16 @@ def _check(condition, message):
         raise SpecError(message)
 
 
+def _pose(pose):
+    """A lead's trajectory with numbers where numbers belong, or None when it
+    lacks a tip or one of its three angles: such a lead stays where its file
+    puts it rather than be aimed by angles nobody chose."""
+    if not all(k in pose for k in ("tip", "sagittal", "coronal", "marker")):
+        return None
+    tip = [float(v) for v in (list(pose["tip"]) + [0, 0, 0])[:3]]
+    return {"tip": tip, "sagittal": float(pose["sagittal"]), "coronal": float(pose["coronal"]), "marker": float(pose["marker"]) % 360.0}
+
+
 def normalize_spec(spec):
     """Fill in defaults and reject anything the renderer could not draw.
 
@@ -451,6 +470,8 @@ def normalize_spec(spec):
             layer["hidden_regions"] = [str(r) for r in
                                        (layer.get("hidden_regions") or [])]
             layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
+            layer["poses"] = {str(side): _pose(pose) for side, pose in (layer.get("poses") or {}).items() if pose and _pose(pose)}
+            layer["mirror"] = None if layer.get("mirror") is None else str(layer["mirror"])
 
         if kind == "volume":
             _check(layer["opacity_profile"] in OPACITY_PROFILES,

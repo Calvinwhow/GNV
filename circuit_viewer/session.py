@@ -627,7 +627,7 @@ class RenderSession:
         self._geometry = OrderedDict()
         self._groups = OrderedDict()   # loaded mesh groups, before any cutting
         self._fibers = OrderedDict()
-        self._electrodes = {}   # placed lead geometry, by source
+        self._electrodes = OrderedDict()   # placed lead geometry, by source, model and poses
         self._layer_warnings = {}   # layer id -> complaints, while it lives
         self._drawing = None        # the layer being built, for warn()
         self._interiors = OrderedDict()   # mesh group + step -> interior points
@@ -1702,18 +1702,21 @@ class RenderSession:
     def _electrode_geometry(self, layer):
         """``{part name: PolyData}`` for a lead, already placed on the patient.
 
-        Cached on the source and the model override alone. Reading a model file
-        and solving the placement is a fraction of a second, but it is pure
-        geometry: hiding a contact or recolouring the shaft must not redo it.
+        Cached on the source, the model override and the per-lead poses. Reading a
+        model file and solving the placement is a fraction of a second, but it is
+        pure geometry: hiding a contact or recolouring the shaft must not redo it.
         """
         from calvin_utils.plotting_utils.electrode_render import electrode_meshes
 
-        key = _key(layer, ("source", "model"))
+        key = _key(layer, ("source", "model", "poses", "mirror"))
         group = self._electrodes.get(key)
         if group is None:
-            group = electrode_meshes(layer["source"], ELECTRODE_MODEL_DIR,
-                                     model=layer.get("model"))
+            group = electrode_meshes(layer["source"], ELECTRODE_MODEL_DIR, model=layer.get("model"), poses=layer.get("poses"), mirror=layer.get("mirror"))
             self._electrodes[key] = group
+            # Every slider step of a trajectory is a new key: keep a few recent.
+            while len(self._electrodes) > 4:
+                self._electrodes.popitem(last=False)
+        self._electrodes.move_to_end(key)
         hidden = set(layer.get("hidden_regions") or ())
         return {name: mesh for name, mesh in group.items() if name not in hidden}
 
