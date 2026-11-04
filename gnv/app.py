@@ -129,7 +129,7 @@ def create_app(spec=None, drop_dir=None):
     try:
         seed()                  # the shipped cortical surfaces, for offline use
     except Exception as exc:
-        print(f"circuit_viewer: could not seed yabplot's cache: {exc!r}")
+        print(f"gnv: could not seed yabplot's cache: {exc!r}")
     app = Flask(__name__, static_folder=None)
     # Drops are temporary: they live in this run's scratch folder (see
     # scratch.py), are collected once nothing uses them, and go with the run.
@@ -199,7 +199,7 @@ def create_app(spec=None, drop_dir=None):
     @app.get("/api/volumes")
     def api_volumes():
         """Packaged bodies and prepared backdrops for the volume layer's picker."""
-        from circuit_viewer.volume_render import library
+        from gnv.volume_render import library
 
         return jsonify(library())
 
@@ -224,7 +224,7 @@ def create_app(spec=None, drop_dir=None):
     def api_volume_labels():
         """The regions of a label atlas used as a body, named from its LUT:
         ``{"labels": [...], "table": path or None}``."""
-        from circuit_viewer.volume_render import atlas_labels
+        from gnv.volume_render import atlas_labels
 
         return jsonify(atlas_labels(request.args.get("source", ""),
                                     request.args.get("lut") or None))
@@ -256,7 +256,7 @@ def create_app(spec=None, drop_dir=None):
             return jsonify({"error": "no file in the request"}), 400
         name = Path(item.filename).name
         allowed = (".nii", ".nii.gz", ".mat", ".npy", ".npz", ".tck", ".trk",
-                   ".trx", ".json", ".lut", ".txt", ".tsv", ".csv", ".cvpack")
+                   ".trx", ".json", ".lut", ".txt", ".tsv", ".csv", ".gnvpack")
         if not name.lower().endswith(allowed):
             return jsonify(
                 {"error": f"{name} is not a volume, tractogram, lead or "
@@ -270,7 +270,7 @@ def create_app(spec=None, drop_dir=None):
         lower = name.lower()
         if lower.endswith(".fib.npy"):
             kind = "fiber_values"
-        elif lower.endswith(".cvpack"):
+        elif lower.endswith(".gnvpack"):
             kind = "pack"           # installed by the page with /api/packs/install
         elif lower.endswith((".mat", ".json")):
             from calvin_utils.plotting_utils.electrode_render import (
@@ -621,7 +621,7 @@ def create_app(spec=None, drop_dir=None):
         want = request.args.get("kind", "any")
         suffixes = {"mesh": MESH_SUFFIXES, "volume": VOLUME_SUFFIXES,
                     "fibers": FIBER_SUFFIXES, "labels": LABEL_SUFFIXES,
-                    "pack": {".cvpack"}}.get(want)
+                    "pack": {".gnvpack"}}.get(want)
 
         entries = []
         try:
@@ -644,7 +644,7 @@ def create_app(spec=None, drop_dir=None):
         from .lineart import attach as _attach_lineart
         _attach_lineart(app, session, lock)
     except Exception as exc:
-        print(f"circuit_viewer: line art add-on not loaded: {exc!r}")
+        print(f"gnv: line art add-on not loaded: {exc!r}")
 
     return app
 
@@ -655,7 +655,7 @@ def require_renderer():
         import calvin_utils.plotting_utils.brains  # noqa: F401
     except ImportError as exc:
         raise SystemExit(
-            "circuit_viewer draws with circuit_pyper's renderer, which is not "
+            "gnv draws with circuit_pyper's renderer, which is not "
             f"importable here ({exc}).\n"
             "Install it, or run this from an environment that has it:\n"
             "    pip install -e /path/to/calvin_utils_project/circuit_pyper"
@@ -665,7 +665,7 @@ def require_renderer():
 def main(argv=None):
     import argparse
 
-    parser = argparse.ArgumentParser(prog="circuit-viewer",
+    parser = argparse.ArgumentParser(prog="gnv",
                                      description="Layered brain figure viewer.")
     parser.add_argument("project", nargs="?", help="a .json layer spec to open")
     parser.add_argument("--port", type=int, default=8731)
@@ -680,5 +680,5 @@ def main(argv=None):
     url = f"http://{args.host}:{args.port}/"
     if not args.no_browser:
         Timer(1.0, lambda: webbrowser.open(url)).start()
-    print(f"circuit viewer -> {url}")
+    print(f"General Neuroimage Viewer -> {url}")
     app.run(host=args.host, port=args.port, threaded=True)

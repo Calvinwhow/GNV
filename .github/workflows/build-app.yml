@@ -63,39 +63,39 @@ jobs:
         run: python packaging/fetch_yabplot_surfaces.py
 
       - name: Build
-        run: python -m PyInstaller --noconfirm --clean packaging/CircuitViewer.spec
+        run: python -m PyInstaller --noconfirm --clean packaging/GeneralNeuroimageViewer.spec
 
       - name: Check the build serves its data
         env:
-          CIRCUIT_VIEWER_HOME: ${{ runner.temp }}/cv-home
+          GNV_HOME: ${{ runner.temp }}/gnv-home
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            "dist/Circuit Viewer.app/Contents/MacOS/CircuitViewer" --check
+            "dist/General Neuroimage Viewer.app/Contents/MacOS/GeneralNeuroimageViewer" --check
           else
-            dist/CircuitViewer/CircuitViewer.exe --check || { cat "$CIRCUIT_VIEWER_HOME/launcher.log"; exit 1; }
-            cat "$CIRCUIT_VIEWER_HOME/launcher.log"
+            dist/GeneralNeuroimageViewer/GeneralNeuroimageViewer.exe --check || { cat "$GNV_HOME/launcher.log"; exit 1; }
+            cat "$GNV_HOME/launcher.log"
           fi
 
       - name: Package for macOS (drag-to-Applications disk image)
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist/dmg
-          cp -R "dist/Circuit Viewer.app" dist/dmg/
+          cp -R "dist/General Neuroimage Viewer.app" dist/dmg/
           ln -s /Applications dist/dmg/Applications
-          hdiutil create -volname "Circuit Viewer" -srcfolder dist/dmg -ov -format UDZO "dist/CircuitViewer-${{ matrix.name }}.dmg"
-          echo "PACKAGE=dist/CircuitViewer-${{ matrix.name }}.dmg" >> "$GITHUB_ENV"
+          hdiutil create -volname "General Neuroimage Viewer" -srcfolder dist/dmg -ov -format UDZO "dist/GeneralNeuroimageViewer-${{ matrix.name }}.dmg"
+          echo "PACKAGE=dist/GeneralNeuroimageViewer-${{ matrix.name }}.dmg" >> "$GITHUB_ENV"
 
       - name: Package for Windows (zip)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist\CircuitViewer" -DestinationPath "dist\CircuitViewer-${{ matrix.name }}.zip"
-          "PACKAGE=dist/CircuitViewer-${{ matrix.name }}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Compress-Archive -Path "dist\GeneralNeuroimageViewer" -DestinationPath "dist\GeneralNeuroimageViewer-${{ matrix.name }}.zip"
+          "PACKAGE=dist/GeneralNeuroimageViewer-${{ matrix.name }}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Upload build
         uses: actions/upload-artifact@v7
         with:
-          name: CircuitViewer-${{ matrix.name }}
+          name: GeneralNeuroimageViewer-${{ matrix.name }}
           path: ${{ env.PACKAGE }}
           if-no-files-found: error
 
@@ -114,4 +114,4 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" builds/* --repo "$GITHUB_REPOSITORY" --title "Circuit Viewer $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" builds/* --repo "$GITHUB_REPOSITORY" --title "General Neuroimage Viewer $GITHUB_REF_NAME" --generate-notes

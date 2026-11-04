@@ -1,13 +1,13 @@
 # The packaged viewer: PyInstaller, one folder, windowed; a .app on macOS.
 # Build from the repository root (the renderer and packaging/requirements.txt
 # installed, and packaging/fetch_yabplot_surfaces.py run first):
-#     python -m PyInstaller --noconfirm --clean packaging/CircuitViewer.spec
+#     python -m PyInstaller --noconfirm --clean packaging/GeneralNeuroimageViewer.spec
 #
 # What ships: the viewer's code and page, and everything in
-# circuit_viewer/resources -- which holds only what ships: the meshes,
+# gnv/resources -- which holds only what ships: the meshes,
 # backdrops and electrode models its index.json files list, plus the cortical
 # surfaces yabplot would download. Anything else -- the 100 um backdrops,
-# converted atlases, the Lead-DBS surfaces -- is a library (circuit_viewer/paths.py),
+# converted atlases, the Lead-DBS surfaces -- is a library (gnv/paths.py),
 # filled by converting or by installing content packs.
 
 import sys
@@ -16,7 +16,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).parent
-PACKAGE = ROOT / "circuit_viewer"
+PACKAGE = ROOT / "gnv"
 RESOURCES = PACKAGE / "resources"
 
 
@@ -30,10 +30,10 @@ def folder(source, dest):
 
 
 datas = (
-    folder(PACKAGE / "static", "circuit_viewer/static")
-    + folder(PACKAGE / "lineart" / "static", "circuit_viewer/lineart/static")
-    + folder(PACKAGE / "volumes", "circuit_viewer/volumes")
-    + folder(RESOURCES, "circuit_viewer/resources")
+    folder(PACKAGE / "static", "gnv/static")
+    + folder(PACKAGE / "lineart" / "static", "gnv/lineart/static")
+    + folder(PACKAGE / "volumes", "gnv/volumes")
+    + folder(RESOURCES, "gnv/resources")
     + collect_data_files("yabplot")
 )
 
@@ -43,14 +43,14 @@ a = Analysis(
     datas=datas,
     # Imported by name at run time, out of the analyser's sight. (All of VTK
     # comes along regardless: the viewer imports it as ``import vtk``.)
-    hiddenimports=collect_submodules("circuit_viewer") + ["calvin_utils.neuroimaging_utils.nifti_utils.parcel_meshes"],
+    hiddenimports=collect_submodules("gnv") + ["calvin_utils.neuroimaging_utils.nifti_utils.parcel_meshes"],
     # Optional imports of the libraries above that the viewer never uses.
     excludes=["torch", "jax", "tensorflow", "keras", "IPython", "notebook", "jupyterlab", "cv2", "imageio_ffmpeg", "sklearn", "tkinter"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="CircuitViewer", console=False)
-coll = COLLECT(exe, a.binaries, a.datas, name="CircuitViewer")
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="GeneralNeuroimageViewer", console=False)
+coll = COLLECT(exe, a.binaries, a.datas, name="GeneralNeuroimageViewer")
 
 if sys.platform == "darwin":
-    app = BUNDLE(coll, name="Circuit Viewer.app", bundle_identifier="edu.bwh.circuitviewer", info_plist={"NSHighResolutionCapable": True})
+    app = BUNDLE(coll, name="General Neuroimage Viewer.app", bundle_identifier="edu.bwh.gnv", info_plist={"NSHighResolutionCapable": True})

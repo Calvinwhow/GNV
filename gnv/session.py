@@ -372,7 +372,7 @@ def _framed(overlay):
     with ``extend_mm`` pointed at its grown copy (see ``extend``); anything
     else unchanged. Done here, where every painter collects its overlays, so
     meshes, slices, bodies and fibres all play a series the same way."""
-    from circuit_viewer import extend, frames
+    from gnv import extend, frames
 
     key = _spec_key(overlay)
     try:
@@ -385,7 +385,7 @@ def _framed(overlay):
     except Exception as exc:  # draw the map unextended, but say so
         import sys
 
-        print(f"circuit_viewer: could not extend {overlay.get('nifti')}: {exc!r}",
+        print(f"gnv: could not extend {overlay.get('nifti')}: {exc!r}",
               file=sys.stderr)
         return overlay
 
@@ -1259,7 +1259,7 @@ class RenderSession:
         Pinned from the map's own voxels, a value is the same colour on every
         plane, in the volume body, and in the bar.
         """
-        from circuit_viewer import volume_render as vr
+        from gnv import volume_render as vr
 
         out = []
         for overlay in _fills(layer.get("overlays")):
@@ -1320,7 +1320,7 @@ class RenderSession:
         adds it, so the scene's lights, background and camera apply to a body
         exactly as they do to a mesh. A missing or unreadable body is a
         warning on its layer, not a failed render."""
-        from circuit_viewer import volume_render as vr
+        from gnv import volume_render as vr
 
         try:
             source = vr.resolve_source(layer["source"])
@@ -1359,7 +1359,7 @@ class RenderSession:
         """``[(region volume, colour, opacity, width)]`` for a painted body:
         the body drawn unlit, white where each outline overlay is, black
         elsewhere -- a mask of what that overlay colours on screen."""
-        from circuit_viewer import volume_render as vr
+        from gnv import volume_render as vr
 
         jobs = []
         for overlay in traced:
@@ -1376,8 +1376,8 @@ class RenderSession:
         """``[(surface, colour, opacity, width)]``: each outline overlay's
         region as a surface, cut where the body is cut, inside the body unless
         overlays may go outside it."""
-        from circuit_viewer import outlines
-        from circuit_viewer import volume_render as vr
+        from gnv import outlines
+        from gnv import volume_render as vr
 
         jobs = []
         outside = bool(layer.get("overlay_outside"))
@@ -1428,7 +1428,7 @@ class RenderSession:
         qualities; only a large one is drawn coarse while working."""
         if layer.get("kind") != "volume" or not layer.get("source"):
             return None
-        from circuit_viewer import volume_render as vr
+        from gnv import volume_render as vr
 
         try:
             return vr.level_for(vr.resolve_source(layer["source"]),
@@ -1465,7 +1465,7 @@ class RenderSession:
         """Grids are cached on the path and level: re-reading one costs more
         than the rest of a frame, and a slider must not pay for it. Both levels
         of a large body stay cached, so toggling hi-res back is free."""
-        from circuit_viewer import volume_render as vr
+        from gnv import volume_render as vr
 
         try:
             stamp = os.path.getmtime(source)
@@ -1683,7 +1683,7 @@ class RenderSession:
         """Outlines of mesh and volume overlays, laid over a finished frame:
         each region drawn alone with this frame's camera, and a line centred
         on its edges drawn on the image (see outlines.py)."""
-        from circuit_viewer import outlines
+        from gnv import outlines
 
         visible = {layer["id"] for layer in self.spec["layers"]
                    if layer.get("visible", True)}
@@ -1790,7 +1790,7 @@ class RenderSession:
     def _slice_outline(self, pl, back, axis, world_mm, overlay, actor=None):
         """An overlay's outline on one slice plane: a new line actor, or
         ``actor`` re-pointed at the plane's new position."""
-        from circuit_viewer import outlines
+        from gnv import outlines
 
         try:
             poly = outlines.plane_outline(back, axis, back.index_for(axis, world_mm),

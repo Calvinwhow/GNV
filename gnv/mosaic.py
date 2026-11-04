@@ -1,6 +1,6 @@
 """Six-view figure mosaics, rendered by the viewer itself, from one call.
 
-    from circuit_viewer.mosaic import mosaic
+    from gnv.mosaic import mosaic
 
     img = mosaic("tmap.nii.gz")                          # x-rayed onto spm152
     img = mosaic("tmap.nii.gz", "fig.png", threshold=2.3)
@@ -146,8 +146,8 @@ def mosaic(source, out=None, *, mode=None, overlay=None, layer=None,
     """
     from PIL import Image
 
-    from circuit_viewer import spec as S
-    from circuit_viewer.session import RenderSession
+    from gnv import spec as S
+    from gnv.session import RenderSession
 
     source = str(Path(str(source)).expanduser())
     mode = mode or ("fibers" if _is_descriptor(source) else "volume")
@@ -215,7 +215,7 @@ def _options(mode, options):
 def _route(mode, extra, overlay, layer, scene):
     """Send each remaining keyword to the overlay, the layer or the scene by
     its viewer name. Overlay names win a tie; the dicts are explicit."""
-    from circuit_viewer import spec as S
+    from gnv import spec as S
 
     layer_base = {"volume": S.VOLUME_LAYER, "mesh": S.MESH_LAYER,
                   "slice": S.SLICE_LAYER, "fibers": S.FIBER_LAYER}[mode]
@@ -266,7 +266,7 @@ def _overlays(source, opts, overlay_fields):
     two-tailed cut is drawn as two overlays, one per tail, sharing one scale.
     ``max_value`` is likewise a magnitude ceiling then.
     """
-    from circuit_viewer import spec as S
+    from gnv import spec as S
 
     base = dict(nifti=source, palette=opts["palette"],
                 symmetric=opts["symmetric"], sign=opts["sign"],
@@ -310,7 +310,7 @@ def _scale(mode, source, opts, overlay_fields):
                              max_value=ov.get("max_value"))
             parts.append(values[np.isfinite(values)])
         else:
-            from circuit_viewer import volume_render as vr
+            from gnv import volume_render as vr
 
             parts.append(vr.native_values(ov))
     finite = np.concatenate(parts) if parts else np.zeros(0)
@@ -374,7 +374,7 @@ def _soft_palette(name, opts, symmetric):
 
 # -- one view ---------------------------------------------------------------
 def _view_spec(mode, source, view, opts, pinned, layer_fields, scene_fields):
-    from circuit_viewer import spec as S
+    from gnv import spec as S
 
     ovs = copy.deepcopy(pinned)
 
@@ -402,7 +402,7 @@ def _view_spec(mode, source, view, opts, pinned, layer_fields, scene_fields):
 
 
 def _layers(mode, ovs, opts, keep):
-    from circuit_viewer import spec as S
+    from gnv import spec as S
 
     cut = _midline_cut(keep)
     if mode == "volume":
@@ -464,7 +464,7 @@ def _half_mask(side):
     viewer's scratch folder (and removed with it)."""
     import nibabel as nib
 
-    from circuit_viewer import scratch
+    from gnv import scratch
 
     folder = scratch.area("mosaic")
     path = folder / f"half_{side}.nii.gz"
@@ -601,7 +601,7 @@ def _backdrop_path(name):
     text = str(name)
     if text.lower().endswith(".npz") or "/" in text:
         return str(Path(text).expanduser())
-    from circuit_viewer.paths import prepared_backdrops
+    from gnv.paths import prepared_backdrops
 
     found = prepared_backdrops().get(text)
     return str(found) if found is not None else text
@@ -616,7 +616,7 @@ def _label(source):
 
 
 def _main(argv=None):
-    """``python -m circuit_viewer.mosaic map.nii.gz fig.png key=value ...``
+    """``python -m gnv.mosaic map.nii.gz fig.png key=value ...``
 
     Values are read as JSON when they parse (numbers, true/false, null, lists)
     and as text otherwise: ``threshold=2.3 render=surface views='[["superior"]]'``.

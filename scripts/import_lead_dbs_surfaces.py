@@ -1,6 +1,6 @@
 """Normalize a Lead-DBS surface bundle into a meshes folder: the surfaces go in
 brain_surfaces/lead_dbs/, and each gets an entry in the folder's index.json.
-By default that is the library's (circuit_viewer/paths.py), since these
+By default that is the library's (gnv/paths.py), since these
 surfaces are not shipped with the viewer."""
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pyvista as pv
 from scipy.io import loadmat
 
 from calvin_utils.resource_index import add_entry
-from circuit_viewer.paths import LIBRARY_DIR
+from gnv.paths import LIBRARY_DIR
 
 
 def polydata(points, triangles):

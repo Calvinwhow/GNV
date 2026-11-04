@@ -1,4 +1,4 @@
-"""Line art -- an optional, self-contained add-on to the circuit viewer.
+"""Line art -- an optional, self-contained add-on to the General Neuroimage Viewer.
 
 Draws the current view as contour lines, hatching and outlines (after Michael
 Fogleman's ``ln``) instead of shaded surfaces, and exports it as an SVG.

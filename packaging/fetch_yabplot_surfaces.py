@@ -1,18 +1,18 @@
 """Download the cortical surfaces the built-in meshes are made of into
-circuit_viewer/resources/yabplot, for the build to ship (see
-circuit_viewer/yabplot_cache.py). Run from the repository root before PyInstaller."""
+gnv/resources/yabplot, for the build to ship (see
+gnv/yabplot_cache.py). Run from the repository root before PyInstaller."""
 
 import shutil
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))     # the repository, for circuit_viewer
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))     # the repository, for gnv
 
-import circuit_viewer  # noqa: F401 -- first, so the renderer looks for meshes in the viewer's resources
+import gnv  # noqa: F401 -- first, so the renderer looks for meshes in the viewer's resources
 from calvin_utils.plotting_utils.glass_mesh import BMESH_NAMES
 from yabplot.data import _resolve_resource_path
 
-DEST = Path(__file__).resolve().parent.parent / "circuit_viewer" / "resources" / "yabplot"
+DEST = Path(__file__).resolve().parent.parent / "gnv" / "resources" / "yabplot"
 
 
 def main():

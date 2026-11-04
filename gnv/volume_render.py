@@ -129,8 +129,8 @@ _RESAMPLE_BYTES = 2 << 30
 # draw the coarse level, so each frame is cheap; hi-res and export draw the fine
 # one. A body under the preview budget is drawn whole at both. Overridable from
 # the environment, because what a GPU can hold is the machine's business.
-PREVIEW_VOXELS = int(os.environ.get("CIRCUIT_VIEWER_PREVIEW_VOXELS", 24_000_000))
-EXPORT_VOXELS = int(os.environ.get("CIRCUIT_VIEWER_EXPORT_VOXELS", 160_000_000))
+PREVIEW_VOXELS = int(os.environ.get("GNV_PREVIEW_VOXELS", 24_000_000))
+EXPORT_VOXELS = int(os.environ.get("GNV_EXPORT_VOXELS", 160_000_000))
 
 _shapes = {}                    # (path, mtime) -> (shape, mm)
 import threading as _threading
@@ -139,7 +139,7 @@ _LEVEL_LOCK = _threading.RLock()
 
 def _backdrops():
     """``{name: path}`` for every prepared backdrop, shipped and this user's."""
-    from circuit_viewer.paths import prepared_backdrops
+    from gnv.paths import prepared_backdrops
 
     return OrderedDict(prepared_backdrops())
 
@@ -149,7 +149,7 @@ def library():
     prepared backdrop. Each entry says how it will be drawn, so the panel can
     say so: ``mm`` is its own voxel size, ``preview_mm`` and ``export_mm`` the
     levels it is drawn at while working and for hi-res / export."""
-    from circuit_viewer.paths import index
+    from gnv.paths import index
 
     out = []
     entries = [(name, path, "packaged", "Packaged volumes", f"{name} (packaged)", "") for name, path in LIBRARY.items()]
@@ -1684,7 +1684,7 @@ def region_actor(grid, layer, overlays, overlay, material):
     """
     data = _volume_data(grid, layer, list(overlays), "surface")
     rgba = np.asarray(data.grid.point_data["rgba"])
-    from circuit_viewer.outlines import colour_floor
+    from gnv.outlines import colour_floor
 
     raw = _on_grid(grid, overlay["nifti"],
                    smooth_vox=float(layer.get("overlay_smooth_vox") or 0.0))

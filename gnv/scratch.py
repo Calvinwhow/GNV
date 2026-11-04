@@ -1,10 +1,10 @@
-"""Every temporary file circuit_viewer writes, in one place it owns.
+"""Every temporary file gnv writes, in one place it owns.
 
 Only PREPARED backdrops and atlases (the library, see ``paths``: the ``.npz``, their
 level sidecars, region meshes) are kept between runs. Everything else the viewer makes
 -- uploaded drops, the per-frame copies a 4D map plays from, mosaic helper
 masks -- lives under ``SCRATCH_ROOT`` (``scratch`` in ``paths.USER_DIR`` by default,
-``$CIRCUIT_VIEWER_SCRATCH`` to move it), in a folder for this process alone:
+``$GNV_SCRATCH`` to move it), in a folder for this process alone:
 
     scratch/
       run-<host>-<pid>-<token>/
@@ -26,7 +26,7 @@ its disk:
    server framework has claimed that signal).
 4. AT START, run folders left by processes on this host that no longer exist
    -- a crash, a SIGKILL -- are removed, as are the system-temp folders older
-   versions wrote (``circuit_viewer_drops`` and friends).
+   versions wrote (``gnv_drops`` and friends).
 
 "Who points at what" comes from protectors: callables that return paths in
 use. The app registers one that walks the open figure, so removing a layer
@@ -51,14 +51,14 @@ from .paths import USER_DIR
 __all__ = ["SCRATCH_ROOT", "area", "run_dir", "sweep", "touch", "protect",
            "cleanup", "usage"]
 
-SCRATCH_ROOT = Path(os.environ.get("CIRCUIT_VIEWER_SCRATCH")
+SCRATCH_ROOT = Path(os.environ.get("GNV_SCRATCH")
                     or USER_DIR / "scratch").expanduser()
-BUDGET_BYTES = int(float(os.environ.get("CIRCUIT_VIEWER_SCRATCH_MB", 4096)) * 2 ** 20)
+BUDGET_BYTES = int(float(os.environ.get("GNV_SCRATCH_MB", 4096)) * 2 ** 20)
 FRAME_IDLE_S = 10 * 60
 DROP_IDLE_S = 30 * 60
 _SWEEP_EVERY_S = 60
 # Folders older versions left in the system temp directory.
-_LEGACY = ("circuit_viewer_drops", "circuit_viewer_frames", "circuit_viewer_mosaic")
+_LEGACY = ("gnv_drops", "gnv_frames", "gnv_mosaic")
 
 _HOST = "".join(c if c.isalnum() else "-" for c in socket.gethostname())[:40] or "host"
 _lock = threading.RLock()
@@ -75,7 +75,7 @@ def run_dir():
             SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
             ignore = SCRATCH_ROOT / ".gitignore"
             if not ignore.exists():
-                ignore.write_text("# circuit_viewer scratch: never committed\n*\n")
+                ignore.write_text("# gnv scratch: never committed\n*\n")
             _remove_stale()
             _run = SCRATCH_ROOT / f"run-{_HOST}-{os.getpid()}-{uuid4().hex[:8]}"
             _run.mkdir()

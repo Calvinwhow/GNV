@@ -1,4 +1,4 @@
-"""circuit_viewer -- a layered brain-figure viewer built on the circuit_pyper renderer."""
+"""gnv -- a layered brain-figure viewer built on the circuit_pyper renderer."""
 
 __all__ = ["__version__"]
 __version__ = "0.1.0"

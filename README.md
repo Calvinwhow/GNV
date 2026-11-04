@@ -1,4 +1,4 @@
-# circuit viewer
+# General Neuroimage Viewer
 
 A layered viewer for brain figures.  It draws with the same off-screen PyVista
 renderer as `circuit_pyper`, so what you arrange here is pixel-for-pixel what
@@ -7,8 +7,8 @@ the export writes -- the app is a control panel, not a second renderer.
 STARTUP
 ```bash
 pip install -e .
-circuit-viewer                     # opens http://127.0.0.1:8731
-circuit-viewer figure.json         # ... with a saved figure loaded
+gnv                     # opens http://127.0.0.1:8731
+gnv figure.json         # ... with a saved figure loaded
 ```
 
 SHUTOFF 
@@ -68,7 +68,7 @@ Pieces under 27 voxels are dropped and at most 64 of the largest are built,
 because a threshold that leaves 400 speckles is minutes of marching cubes for a
 figure nobody can read.  What was dropped is reported, not silently discarded.
 
-Locally converted surfaces live in `circuit_viewer/resources/meshes/`. Standalone
+Locally converted surfaces live in `gnv/resources/meshes/`. Standalone
 `.vtp` surfaces and folders containing a bilateral `L.vtk` / `R.vtk` pair are
 added to the mesh-library menu automatically. An adjacent `catalogue.json` can
 give each resource the basename and explanation shown in that menu.
@@ -110,7 +110,7 @@ slice per axis.  Reading slice 412 decompresses exactly that member, a
 millisecond or so, instead of touching the volume; all three axes are stored
 because a single array can only be sliced cheaply along its first.
 
-The library lives in `circuit_viewer/resources/backdrops/` inside this local
+The library lives in `gnv/resources/backdrops/` inside this local
 installation. Generated `.npz` files and in-progress `.building.raw` scratch
 files are ignored by Git, keeping the data beside the viewer without committing
 multi-gigabyte artifacts.
@@ -238,8 +238,8 @@ when a reviewer asks what changed, hand-edit it, or build it here and load it
 from a script:
 
 ```python
-from circuit_viewer.session import RenderSession
-from circuit_viewer.spec import load_spec
+from gnv.session import RenderSession
+from gnv.spec import load_spec
 
 RenderSession(load_spec("figure.json")).export("figure.png", size=(1700, 1400))
 ```

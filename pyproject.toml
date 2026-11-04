@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "circuit-viewer"
+name = "gnv"
 version = "0.1.0"
 description = "Layered brain-figure viewer: meshes, volumes and tractograms as editable layers."
 requires-python = ">=3.9"
@@ -18,10 +18,10 @@ dependencies = [
 ]
 
 [project.scripts]
-circuit-viewer = "circuit_viewer.app:main"
+gnv = "gnv.app:main"
 
 [tool.setuptools.packages.find]
-include = ["circuit_viewer*"]
+include = ["gnv*"]
 
 [tool.setuptools.package-data]
-circuit_viewer = ["static/*", "volumes/*"]
+gnv = ["static/*", "volumes/*"]

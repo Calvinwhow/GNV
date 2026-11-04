@@ -1,4 +1,4 @@
-/* circuit viewer -- the browser half.
+/* General Neuroimage Viewer -- the browser half.
  *
  * The client owns the spec and nothing else. Every edit mutates the local spec,
  * POSTs it, and asks for a fresh PNG; all geometry stays in the Python process
@@ -2006,11 +2006,11 @@ function dropTarget(node, handler){
 /* ---------- library and content packs ----------
  * The prepared atlases and backdrops: the small defaults the viewer ships with
  * and this user's own (converted, or installed from packs). A content pack
- * (.cvpack, see packs.py) carries items from one library to another: drop one
+ * (.gnvpack, see packs.py) carries items from one library to another: drop one
  * on the view or on any + box to install it, or use Install pack -- the better
  * route for a big one, since it is read where it lies instead of being copied
  * through the page. Make pack writes the ticked items to one. */
-const PACK_RE = /\.cvpack$/i;
+const PACK_RE = /\.gnvpack$/i;
 const fmtBytes = n => n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(0) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' kB';
 
 /* Start a background job and wait for it, showing its progress. */
@@ -2047,16 +2047,16 @@ async function drawLibrary(){
   try { lib = await getJSON('/api/library'); } catch (e) { host.appendChild(el('div', 'hint', e.message)); return; }
   const ticked = [];
   const install = el('button', null, 'Install pack …');
-  install.title = 'install a .cvpack into your library (or drop one on the view)';
+  install.title = 'install a .gnvpack into your library (or drop one on the view)';
   install.onclick = () => chooseFile('pack', $('#m-path').value, async p => {
     try { await installPackAt(p, p.split('/').pop()); await afterLibraryChange(); } catch (e) { status(e.message, true); } });
   const make = el('button', null, 'Make pack from ticked …');
-  make.title = 'write the ticked meshes, backdrops and fiber sets to one .cvpack file, to give to someone';
+  make.title = 'write the ticked meshes, backdrops and fiber sets to one .gnvpack file, to give to someone';
   make.onclick = () => {
     const items = ticked.filter(t => t.box.checked).map(t => t.item);
     if (!items.length){ status('tick the meshes, backdrops or fiber sets to put in the pack', true); return; }
     chooseFile('save', $('#m-path').value, async p => {
-      if (!PACK_RE.test(p)) p += '.cvpack';
+      if (!PACK_RE.test(p)) p += '.gnvpack';
       const notes = prompt('Notes for whoever installs it — where the data come from, how to cite it, its licence (optional):', '');
       if (notes === null) return;
       try {
@@ -2081,7 +2081,7 @@ async function drawLibrary(){
     });
   }
   host.appendChild(el('div', 'hint', 'Your conversions and installed packs are kept in ' + lib.dir + ', each listed in its folder\'s index.json' +
-    '. Drop a .cvpack on the view to install it; Install pack reads a big one in place instead of copying it through the page.'));
+    '. Drop a .gnvpack on the view to install it; Install pack reads a big one in place instead of copying it through the page.'));
 }
 $('#librarypanel').addEventListener('toggle', () => { if ($('#librarypanel').open) drawLibrary(); });
 
@@ -2119,7 +2119,7 @@ async function browse(path, kind){
 function chooseFile(kind, start, cb, {folder = false, title = null} = {}){
   chooserResolve = cb; chooserKind = kind;
   $('#m-title').textContent = title || {volume:'Choose a NIfTI', fibers:'Choose a fiber file',
-                               save:'Save as', mesh:'Choose a mesh', pack:'Choose a content pack (.cvpack)',
+                               save:'Save as', mesh:'Choose a mesh', pack:'Choose a content pack (.gnvpack)',
                                labels:'Choose a .txt or .lut naming the regions'}[kind] || 'Choose a file';
   $('#modal').classList.toggle('pick-many', folder);
   $('#m-name').value = '';

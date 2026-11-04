@@ -16,7 +16,7 @@
  */
 (() => {
   'use strict';
-  const STORE = 'circuit_viewer.lineart';
+  const STORE = 'gnv.lineart';
   const DEFAULTS = {axis: 'z', spacing_mm: 1.5, hatch: true, hatch_mm: 0.8,
                     region_outline: true, silhouette: true, ink: null, width: 1.0,
                     slice_levels: 6};

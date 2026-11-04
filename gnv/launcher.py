@@ -1,6 +1,6 @@
 """Open the viewer in a window of its own: the double-click way in.
 
-``circuit-viewer`` (``app.main``) serves the viewer and opens a browser tab.
+``gnv`` (``app.main``) serves the viewer and opens a browser tab.
 This does the same job the way a desktop app should:
 
 1. If a viewer this launcher started is still running, it opens another window
@@ -178,7 +178,7 @@ def stop_server(server):
 def parse_args(argv):
     import argparse
 
-    parser = argparse.ArgumentParser(prog="circuit-viewer-launch", description="Open the circuit viewer in its own window.")
+    parser = argparse.ArgumentParser(prog="gnv-launch", description="Open the General Neuroimage Viewer in its own window.")
     parser.add_argument("project", nargs="?", help="a .json figure to open")
     parser.add_argument("--check", action="store_true", help="start the viewer without a window, check that it serves its data, and exit 0 if it does (for build pipelines)")
     return parser.parse_args(argv)
@@ -240,7 +240,7 @@ def main(argv=None):
         return
 
     server, url = start_server(args.project)
-    print(f"circuit viewer -> {url}")
+    print(f"General Neuroimage Viewer -> {url}")
     try:
         if browser is None:
             print("no Chrome or Edge found: opening a browser tab; stop with Ctrl-C")

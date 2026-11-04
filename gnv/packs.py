@@ -1,10 +1,10 @@
 """Content packs: library items in one file, to hand on.
 
-A pack is a zip named ``*.cvpack``. Inside, files sit exactly where they sit in a
+A pack is a zip named ``*.gnvpack``. Inside, files sit exactly where they sit in a
 library (see ``paths``), with a ``manifest.json`` naming each item and carrying
 its index entry:
 
-    manifest.json   {"format": "circuit_viewer pack", "version": 2,
+    manifest.json   {"format": "gnv pack", "version": 2,
                      "title": ..., "notes": ...,
                      "items": [{"kind": "meshes", "name": ...,
                                 "entry": {...its index entry, paths relative...}}]}
@@ -38,9 +38,9 @@ from pathlib import Path, PurePosixPath
 
 from .paths import LIBRARY_DIR, add_entry, entries, index, relative_entry
 
-FORMAT = "circuit_viewer pack"
+FORMAT = "gnv pack"
 VERSION = 2
-SUFFIX = ".cvpack"
+SUFFIX = ".gnvpack"
 KINDS = ("meshes", "backdrops", "fibers")
 
 
@@ -109,11 +109,11 @@ def read_manifest(path):
         with zipfile.ZipFile(Path(path).expanduser()) as pack:
             manifest = json.loads(pack.read("manifest.json"))
     except zipfile.BadZipFile:
-        raise ValueError(f"{Path(path).name} is not a circuit viewer pack (not a zip file)")
+        raise ValueError(f"{Path(path).name} is not a General Neuroimage Viewer pack (not a zip file)")
     except KeyError:
-        raise ValueError(f"{Path(path).name} is not a circuit viewer pack: it has no manifest.json")
+        raise ValueError(f"{Path(path).name} is not a General Neuroimage Viewer pack: it has no manifest.json")
     if manifest.get("format") != FORMAT:
-        raise ValueError(f"{Path(path).name} is not a circuit viewer pack")
+        raise ValueError(f"{Path(path).name} is not a General Neuroimage Viewer pack")
     if int(manifest.get("version", 0)) != VERSION:
         raise ValueError(f"{Path(path).name} is a version {manifest.get('version')} pack; this viewer reads version {VERSION}")
     return manifest

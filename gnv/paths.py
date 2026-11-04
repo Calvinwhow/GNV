@@ -1,4 +1,4 @@
-"""Filesystem locations owned by circuit_viewer.
+"""Filesystem locations owned by gnv.
 
 Resources live in two roots with the same layout:
 
@@ -20,7 +20,7 @@ Adding something by hand is putting its files in a folder and an entry in that
 folder's index. A converted atlas or backdrop, or an installed pack, is written
 to the library and entered in the library's index -- never into resources/.
 
-The library is ``$CIRCUIT_VIEWER_LIBRARY`` when that is set; ``library/`` beside
+The library is ``$GNV_LIBRARY`` when that is set; ``library/`` beside
 ``resources/`` when running from a source checkout (git-ignored, so everything of
 yours is in the repository folder and none of it is committed); otherwise in this
 user's folder, ``USER_DIR`` -- where a packaged app keeps it.
@@ -37,19 +37,19 @@ KINDS = ("meshes", "backdrops", "electrodes", "fibers")
 
 def _user_dir():
     """This user's own folder for the viewer, outside the package: the library of a
-    packaged app, the launcher's files, scratch space. ``$CIRCUIT_VIEWER_HOME`` moves it."""
-    if os.environ.get("CIRCUIT_VIEWER_HOME"):
-        return Path(os.environ["CIRCUIT_VIEWER_HOME"]).expanduser()
+    packaged app, the launcher's files, scratch space. ``$GNV_HOME`` moves it."""
+    if os.environ.get("GNV_HOME"):
+        return Path(os.environ["GNV_HOME"]).expanduser()
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "circuit_viewer"
+        return Path.home() / "Library" / "Application Support" / "gnv"
     if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "circuit_viewer"
-    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "circuit_viewer"
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "gnv"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "gnv"
 
 
 def _library_dir():
-    if os.environ.get("CIRCUIT_VIEWER_LIBRARY"):
-        return Path(os.environ["CIRCUIT_VIEWER_LIBRARY"]).expanduser()
+    if os.environ.get("GNV_LIBRARY"):
+        return Path(os.environ["GNV_LIBRARY"]).expanduser()
     if (PACKAGE_DIR.parent / ".git").exists():
         return PACKAGE_DIR / "library"
     return USER_DIR / "library"

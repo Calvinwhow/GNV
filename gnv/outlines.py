@@ -47,7 +47,7 @@ def colour_floor(overlay):
     sequential scale; None on a diverging one, whose low end is the strongest
     negative rather than a limit. The scale is the map's own (pinned from all
     its selected voxels), the same one slices and bodies paint with."""
-    from circuit_viewer import volume_render as vr
+    from gnv import volume_render as vr
 
     native = vr.native_values(overlay)
     if not native.size:
@@ -68,7 +68,7 @@ def outline_mask(overlay):
     voxels so a traced edge reads as a boundary rather than as the grid.
     """
     from calvin_utils.plotting_utils.mesh_paint import _select, _volume
-    from circuit_viewer import volume_render as vr
+    from gnv import volume_render as vr
 
     floor = colour_floor(overlay)
     smooth = float(overlay.get("outline_smooth", 1.0) or 0.0)
@@ -150,7 +150,7 @@ def region_surface(overlay, body_grid=None, outside=False, body_inside=None):
     and cut to the body (``body_inside``: the body's own inside mask, on
     ``body_grid``) unless ``outside``. Cached on everything it depends on.
     """
-    from circuit_viewer import volume_render as vr
+    from gnv import volume_render as vr
 
     mask, affine = outline_mask(overlay)
     key = (str(overlay["nifti"]), vr._stamp(str(overlay["nifti"])),
