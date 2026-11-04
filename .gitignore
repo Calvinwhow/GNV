@@ -11,12 +11,14 @@ dist/
 *.building.raw
 .DS_Store
 
+# Python environment
 *.venv
-
 *egg-info
-
 *egg
 
+# Mac
 *dl_archive
 
+# Py Cache
 *pyc
+*pycache

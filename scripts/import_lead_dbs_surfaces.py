@@ -14,7 +14,7 @@ import numpy as np
 import pyvista as pv
 from scipy.io import loadmat
 
-from calvin_utils.resource_index import add_entry
+from gnv.resource_index import add_entry
 from gnv.paths import LIBRARY_DIR
 
 

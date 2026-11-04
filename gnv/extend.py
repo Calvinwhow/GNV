@@ -62,7 +62,7 @@ def _transform(path, overlay, reach_mm):
     than the growth can reach."""
     from scipy import ndimage
 
-    from calvin_utils.plotting_utils.mesh_paint import _select
+    from gnv.render.mesh_paint import _select
 
     key = (path, _stamp(path)) + tuple(map(str, _band(overlay)))
     hit = _transforms.get(key)

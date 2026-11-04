@@ -47,7 +47,7 @@ def _kind(path):
 
 def _fibre_values_path(path):
     if str(path).lower().endswith(".json"):
-        from calvin_utils.plotting_utils.fiber_render import read_descriptor
+        from calvin_utils.neuroimaging_utils.tract_utils.fiber_descriptor import read_descriptor
 
         return str(read_descriptor(path)["values"])
     return str(path)
@@ -136,8 +136,8 @@ def frame_path(path, frame):
 
 def _series_scale(path, overlay):
     """The overlay's scale read from every frame: ``{"clim", "symmetric"}``."""
-    from calvin_utils.plotting_utils.mesh_paint import _select
-    from calvin_utils.plotting_utils.overlay_paint import scale_for
+    from gnv.render.mesh_paint import _select
+    from gnv.render.overlay_paint import scale_for
 
     band = (overlay.get("sign"), bool(overlay.get("absolute")),
             overlay.get("threshold"), overlay.get("max_value"),

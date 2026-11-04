@@ -42,9 +42,10 @@ writes one from ticked meshes and backdrops.
 1. Put this repository on GitHub and push `main`.
 2. Commit `gnv/resources/` whole: it is exactly what ships. (The root
    `.gitignore` keeps `gnv/library/` and build products out.)
-3. The renderer is installed from `github.com/Calvinwhow/CircuitPyPer`, branch
-   `development` (`CIRCUITPYPER_REF` in the workflow). Push the viewer-related
-   changes there. While CircuitPyPer is private, add a repository secret
+3. circuit_pyper, which reads the tract file formats, is installed from
+   `github.com/Calvinwhow/CircuitPyPer`, branch `development`
+   (`CIRCUITPYPER_REF` in the workflow), in its light form -- its default
+   install, which is only numpy, scipy, nibabel, h5py and tqdm. While CircuitPyPer is private, add a repository secret
    `CIRCUITPYPER_TOKEN`: a fine-grained token with read access to it.
 
 ## For people you give it to
@@ -64,7 +65,7 @@ removes those warnings; it can be added to the workflow later.
 From the repository root, in a fresh Python 3.11 environment:
 
     python -m pip install -r packaging/requirements.txt
-    python -m pip install --no-deps git+https://github.com/Calvinwhow/CircuitPyPer.git@development
+    python -m pip install git+https://github.com/Calvinwhow/CircuitPyPer.git@development
     python -m PyInstaller --noconfirm --clean packaging/GeneralNeuroimageViewer.spec
 
 The app is in `dist/` (`General Neuroimage Viewer.app` on macOS, `GeneralNeuroimageViewer/` elsewhere).

@@ -296,14 +296,14 @@ def _overlays(source, opts, overlay_fields):
 
 def _scale(mode, source, opts, overlay_fields):
     """``(overlays with one pinned scale, (caption, cmap, clim))``."""
-    from calvin_utils.plotting_utils.mesh_paint import _select
-    from calvin_utils.plotting_utils.overlay_paint import scale_for
+    from gnv.render.mesh_paint import _select
+    from gnv.render.overlay_paint import scale_for
 
     overlays = _overlays(source, opts, overlay_fields)
     parts = []
     for ov in overlays:
         if mode == "fibers":
-            from calvin_utils.plotting_utils.fiber_render import streamline_values
+            from calvin_utils.neuroimaging_utils.tract_utils.fiber_descriptor import streamline_values
 
             values = _select(streamline_values(source), sign=ov["sign"],
                              absolute=ov["absolute"], threshold=ov["threshold"],
@@ -357,7 +357,7 @@ def _soft_palette(name, opts, symmetric):
     import matplotlib
     from matplotlib.colors import ListedColormap
 
-    from calvin_utils.plotting_utils.palettes import resolve_palette
+    from gnv.render.palettes import resolve_palette
 
     base = resolve_palette(name)
     u = np.linspace(0.0, 1.0, 512)
@@ -421,7 +421,7 @@ def _layers(mode, ovs, opts, keep):
             edge_color=opts["edge_color"], edge_opacity=opts["edge_opacity"],
             section=cut, overlays=ovs)]
     # fibres: a glass brain, then the streamlines coloured by the result
-    from calvin_utils.plotting_utils.fiber_render import read_descriptor
+    from calvin_utils.neuroimaging_utils.tract_utils.fiber_descriptor import read_descriptor
 
     found = read_descriptor(ovs[0]["nifti"])
     for ov in ovs:
@@ -547,7 +547,7 @@ def _colorbar(entry, height, opts):
     from matplotlib.colorbar import ColorbarBase
     from PIL import Image
 
-    from calvin_utils.plotting_utils.palettes import opaque
+    from gnv.render.palettes import opaque
 
     caption, cmap, clim = entry
     cmap = opaque(cmap)
@@ -590,7 +590,7 @@ def _is_descriptor(path):
     if not str(path).lower().endswith(".json"):
         return False
     try:
-        from calvin_utils.plotting_utils.fiber_render import is_descriptor
+        from calvin_utils.neuroimaging_utils.tract_utils.fiber_descriptor import is_descriptor
     except ImportError:
         return str(path).lower().endswith(".fib.desc.json")
     return is_descriptor(path)

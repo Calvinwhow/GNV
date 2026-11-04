@@ -4,6 +4,6 @@ from __future__ import annotations
 
 
 def summarise(path):
-    from calvin_utils.plotting_utils.volume_meshes import volume_summary
+    from gnv.convert.volume_meshes import volume_summary
 
     return volume_summary(path)

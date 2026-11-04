@@ -56,8 +56,8 @@ def region_names(mesh, iso=None, split="auto", presmooth_vox=None):
     None for a region neither names, and the panel then offers no section
     control for it rather than one catch-all bucket.
     """
-    from calvin_utils.plotting_utils.brains import supra_region
-    from calvin_utils.resource_index import read_regions
+    from gnv.render.brains import supra_region
+    from gnv.resource_index import read_regions
 
     group = resolve_meshes(mesh, iso=iso, split=split, presmooth_vox=presmooth_vox)
     folder = _region_folder(mesh)
@@ -145,7 +145,7 @@ def tract_side(name):
 def tract_names(source):
     """A fibre set's tracts, for its list: ``[{"name", "side", "section", "hint"}]``
     in the set's order (see ``fiber_set.set_tracts``); ``[]`` for anything else."""
-    from calvin_utils.neuroimaging_utils.tract_utils.fiber_set import set_tracts
+    from gnv.convert.fiber_set import set_tracts
 
     folder = fiber_set_dir(source)
     if folder is None:
@@ -157,7 +157,7 @@ def tract_colours(folder):
     """One RGB per tract of the set, by its position in the set: the tract's
     ``color`` in regions.json, else the next colour of tab10. By position, so a
     tract keeps its colour whichever others are hidden."""
-    from calvin_utils.neuroimaging_utils.tract_utils.fiber_set import set_tracts
+    from gnv.convert.fiber_set import set_tracts
     from matplotlib import colormaps
     from matplotlib.colors import to_rgb
 
@@ -176,8 +176,8 @@ def load_fiber_set(folder, hidden=(), sign="both", min_abs_value=None, max_abs_v
     hidden tracts included, so one value per set fibre can be overlaid;
     ``atlas_fibers`` is that total.
     """
-    from calvin_utils.neuroimaging_utils.tract_utils.fiber_set import set_tracts, tract_fibres
-    from calvin_utils.plotting_utils.fiber_render import fibres_to_lines
+    from gnv.convert.fiber_set import set_tracts, tract_fibres
+    from gnv.render.fiber_render import fibres_to_lines
 
     hidden = set(hidden)
     parts, offset = [], 0
@@ -306,8 +306,8 @@ def _nifti_backdrop(path):
     backdrop. Its own affine is kept -- slices are cut and placed by it, oblique
     or not -- and nothing touches the disk.
     """
-    from calvin_utils.plotting_utils.backdrops import Backdrop
-    from calvin_utils.plotting_utils.mesh_paint import _volume
+    from gnv.convert.backdrops import Backdrop
+    from gnv.render.mesh_paint import _volume
 
     data, affine = _volume(str(path))
     data = np.asarray(data, np.float32)
@@ -397,7 +397,7 @@ def _coloured(values, overlay):
     rather than on whichever vertex came first. A diverging scale has no such
     limit (its low end is the strongest negative), so there it is everything
     that survived."""
-    from calvin_utils.plotting_utils.overlay_paint import scale_for
+    from gnv.render.overlay_paint import scale_for
 
     values = np.asarray(values, float)
     present = np.isfinite(values)
@@ -475,7 +475,7 @@ def _key(layer, fields):
 def _surface_available(spec):
     """Whether every piece of a surface mesh is on disk -- the Lead-DBS
     surfaces, for one, are not part of a packaged viewer."""
-    from calvin_utils.plotting_utils.glass_mesh import _resolve_piece
+    from gnv.render.glass_mesh import _resolve_piece
 
     try:
         for piece in spec.get("pieces", []):
@@ -529,7 +529,7 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
     """
     import pyvista as pv
 
-    from calvin_utils.plotting_utils.mesh_paint import load_parcels
+    from gnv.render.mesh_paint import load_parcels
 
     from .paths import entries
 
@@ -559,7 +559,7 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
         # A volume becomes geometry through the same pipeline that built the
         # SUIT and AAL meshes, so a lesion dropped in today sits beside them and
         # looks like it belongs rather than like an import.
-        from calvin_utils.plotting_utils.volume_meshes import meshes_from_volume
+        from gnv.convert.volume_meshes import meshes_from_volume
 
         meshes, _info = meshes_from_volume(
             Path(text).expanduser(), iso=iso, split=split,
@@ -576,7 +576,7 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
             raise FileNotFoundError(f"{text!r} has no region meshes on this machine: its folder is missing")
         return load_parcels(directory)
     if spec is not None:
-        from calvin_utils.plotting_utils.glass_mesh import build_bmesh
+        from gnv.render.glass_mesh import build_bmesh
 
         return build_bmesh(spec["pieces"])
 
@@ -606,7 +606,7 @@ def _thickness_mm(layer):
     only consulted for specs saved before thickness became a physical size, so
     those keep the look they were saved with.
     """
-    from calvin_utils.plotting_utils.fiber_render import (
+    from gnv.render.fiber_render import (
         TUBE_RADIUS_RANGE, radius_for_width)
 
     if layer.get("tube_radius"):
@@ -791,7 +791,7 @@ class RenderSession:
         region_set = not hemis and len(group) > 1
         reduction = _auto(layer["tessellate"], 0.0)
         if reduction:
-            from calvin_utils.plotting_utils.mesh_paint import coarsen
+            from gnv.render.mesh_paint import coarsen
 
             group = coarsen(group, reduction)
         # Cut last: decimating a cut face rounds off the very edge the section
@@ -867,7 +867,7 @@ class RenderSession:
         base coat under it, and opacity meaning actor transparency rather than
         its own contribution. The bar is now built from ``scale_for`` instead.
         """
-        from calvin_utils.plotting_utils.overlay_paint import (
+        from gnv.render.overlay_paint import (
             composite, overlay_colours, scale_for,
         )
         from matplotlib.colors import to_rgb
@@ -906,7 +906,7 @@ class RenderSession:
         map colours are drawn in the edge colour when ``unmapped`` (the edge
         highlight's own checkbox) and left out otherwise, so turning that box
         off keeps only the map's edges."""
-        from calvin_utils.plotting_utils.overlay_paint import overlay_colours
+        from gnv.render.overlay_paint import overlay_colours
         from matplotlib.colors import to_rgb
 
         size = len(stacks[0])
@@ -941,7 +941,7 @@ class RenderSession:
         """
         if not overlay.get("bar"):
             return
-        from calvin_utils.plotting_utils.overlay_paint import scale_for
+        from gnv.render.overlay_paint import scale_for
 
         values = np.asarray(values, float)
         finite = values[np.isfinite(values)]
@@ -986,7 +986,7 @@ class RenderSession:
         return "cells" if geom["region_set"] else "points"
 
     def _overlay_values(self, layer, geom, overlay):
-        from calvin_utils.plotting_utils.mesh_paint import (
+        from gnv.render.mesh_paint import (
             parcel_interiors, parcel_stats, sample_nifti, select_regions, _select,
         )
 
@@ -996,7 +996,7 @@ class RenderSession:
             # array would let a value cross from one mesh to another wherever
             # their vertices happen to be adjacent in the array, which is not a
             # relationship on any surface.
-            from calvin_utils.plotting_utils.mesh_paint import fill_gaps
+            from gnv.render.mesh_paint import fill_gaps
 
             passes = int(overlay.get("fill_gaps") or 0)
             smooth_mm = float(overlay.get("smooth_mm") or 0.0)
@@ -1085,7 +1085,7 @@ class RenderSession:
         165-region mesh alongside it costs a hundred. Each layer is keyed on how
         it was drawn, so moving a slice plane leaves the meshes alone.
         """
-        from calvin_utils.plotting_utils.render_scene import (
+        from gnv.render.render_scene import (
             add_lights, surface_material,
         )
 
@@ -1209,11 +1209,9 @@ class RenderSession:
                     wanted = float(middle[world_axis])
                 if abs(float(wanted) - entry[2]) < 1e-9:
                     continue
-                quad, texture, _landed = back.plane(
-                    axis, float(wanted), cmap=layer.get("cmap"),
-                    transparent_below=layer.get("transparent_below"),
-                    fill=self._slice_fill(layer),
-                    overlays=self._slice_overlays(layer))
+                from gnv.render.backdrop_plane import backdrop_plane
+
+                quad, texture, _landed = backdrop_plane(back, axis, float(wanted), cmap=layer.get("cmap"), transparent_below=layer.get("transparent_below"), fill=self._slice_fill(layer), overlays=self._slice_overlays(layer))
                 entry[0].points = quad.points
                 entry[1].SetTexture(texture)
                 entry[2] = float(wanted)
@@ -1700,7 +1698,7 @@ class RenderSession:
         dropped on + Slices or opened as a temporary backdrop -- is read once
         and held in memory, 8-bit, by ``_nifti_backdrop``: nothing is written.
         """
-        from calvin_utils.plotting_utils.backdrops import Backdrop
+        from gnv.convert.backdrops import Backdrop
 
         from .paths import prepared_backdrops
 
@@ -1736,12 +1734,9 @@ class RenderSession:
             wanted = layer.get(key)
             if wanted is None:
                 wanted = float(middle[world_axis])
-            quad, texture, _at = back.plane(
-                axis, float(wanted), cmap=layer.get("cmap"),
-                transparent_below=layer.get("transparent_below"),
-                fill=self._slice_fill(layer),
-                overlays=self._slice_overlays(layer, record=True),
-            )
+            from gnv.render.backdrop_plane import backdrop_plane
+
+            quad, texture, _at = backdrop_plane(back, axis, float(wanted), cmap=layer.get("cmap"), transparent_below=layer.get("transparent_below"), fill=self._slice_fill(layer), overlays=self._slice_overlays(layer, record=True))
             # Unlit on purpose: these are photographs of tissue, and shading
             # them would add a highlight that means nothing anatomically.
             actor = pl.add_mesh(quad, texture=texture, lighting=False,
@@ -1789,7 +1784,7 @@ class RenderSession:
         model file and solving the placement is a fraction of a second, but it is
         pure geometry: hiding a contact or recolouring the shaft must not redo it.
         """
-        from calvin_utils.plotting_utils.electrode_render import electrode_meshes
+        from gnv.render.electrode_render import electrode_meshes
 
         key = _key(layer, ("source", "model", "poses", "mirror"))
         group = self._electrodes.get(key)
@@ -1832,7 +1827,7 @@ class RenderSession:
         surface to catch it. Hi-res draws actual swept geometry with normals,
         which is where the sheen comes from.
         """
-        from calvin_utils.plotting_utils.fiber_render import (
+        from gnv.render.fiber_render import (
             line_width_for_radius, load_fibers, radius_for_width, tube_fibers)
 
         key = _key(layer, _FIBER_KEYS)
@@ -1861,7 +1856,7 @@ class RenderSession:
         # left rather than about the whole atlas.
         gates = [g for g in (layer.get("prune") or []) if g.get("enabled", True)]
         if gates:
-            from calvin_utils.plotting_utils.fiber_render import prune_streamlines
+            from gnv.render.fiber_render import prune_streamlines
 
             pruned = prune_streamlines(lines, gates)
             if pruned is None:
@@ -1896,9 +1891,9 @@ class RenderSession:
         return entry["tubes"], True
 
     def _add_fibers(self, pl, layer, material=None):
-        from calvin_utils.plotting_utils.fiber_render import (
+        from gnv.render.fiber_render import (
             fiber_material, line_width_for_radius)
-        from calvin_utils.plotting_utils.render_scene import resolve_scale
+        from gnv.render.render_scene import resolve_scale
 
         poly, tubed = self._fiber_geometry(layer)
         # The panel MODULATES the fibre material rather than replacing it, so
@@ -1921,7 +1916,7 @@ class RenderSession:
         if tubed:
             kw["smooth_shading"] = True
         else:
-            from calvin_utils.plotting_utils.fiber_render import line_width_for_radius
+            from gnv.render.fiber_render import line_width_for_radius
 
             kw.update(line_width=line_width_for_radius(_thickness_mm(layer)),
                       render_lines_as_tubes=True)
@@ -1975,9 +1970,9 @@ class RenderSession:
         normally -- this removes what none of them reach, not what the topmost
         one misses.
         """
-        from calvin_utils.plotting_utils.fiber_render import streamline_values
-        from calvin_utils.plotting_utils.mesh_paint import _select
-        from calvin_utils.plotting_utils.overlay_paint import overlay_colours
+        from calvin_utils.neuroimaging_utils.tract_utils.fiber_descriptor import streamline_values
+        from gnv.render.mesh_paint import _select
+        from gnv.render.overlay_paint import overlay_colours
 
         overlays = [o for o in _fills(layer.get("overlays")) if o.get("nifti")]
         if not overlays:
@@ -2054,9 +2049,9 @@ class RenderSession:
         a bundle can carry a background that later findings overwrite exactly
         where they have something to say and nowhere else.
         """
-        from calvin_utils.plotting_utils.fiber_render import streamline_values
-        from calvin_utils.plotting_utils.mesh_paint import _select
-        from calvin_utils.plotting_utils.overlay_paint import (
+        from calvin_utils.neuroimaging_utils.tract_utils.fiber_descriptor import streamline_values
+        from gnv.render.mesh_paint import _select
+        from gnv.render.overlay_paint import (
             composite, overlay_colours,
         )
         from matplotlib.colors import to_rgb
@@ -2147,7 +2142,7 @@ class RenderSession:
         of the layer colour, and Colour by value looked broken the moment a
         finding was dropped on it.
         """
-        from calvin_utils.plotting_utils.render_scene import resolve_scale
+        from gnv.render.render_scene import resolve_scale
         from matplotlib.colors import to_rgb
 
         coloring = layer.get("coloring", "solid")
@@ -2358,7 +2353,7 @@ def _bar_mapper_for(cmap, clim):
     import pyvista as pv
     import vtk
 
-    from calvin_utils.plotting_utils.palettes import opaque
+    from gnv.render.palettes import opaque
 
     # The bar shows the scale's COLOURS. A LUT's alpha ramp (MRIcroGL's fade
     # their low end out) would draw the bottom of the bar as background.

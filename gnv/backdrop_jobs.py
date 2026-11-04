@@ -31,7 +31,7 @@ _lock = Lock()
 def catalogue():
     """The backdrop dropdowns: both backdrop indexes merged (paths.index), each
     entry with what its archive says about itself."""
-    from calvin_utils.plotting_utils.backdrops import Backdrop, list_backdrops
+    from gnv.convert.backdrops import Backdrop, list_backdrops
 
     items, read = [], {}
     for section in index("backdrops"):
@@ -59,7 +59,7 @@ def status():
 
 def start(path, mm=None, name=None):
     """Convert a NIfTI into a backdrop in the library, entered in its index."""
-    from calvin_utils.plotting_utils.backdrops import _slug
+    from gnv.convert.backdrops import _slug
 
     source = Path(path).expanduser()
     if _slug(name or source.name.split(".nii")[0]) in entries("backdrops"):
@@ -117,7 +117,7 @@ def start_atlas(source, name, table=None):
 
 
 def _run_atlas(source, out, label, table):
-    from calvin_utils.plotting_utils.volume_meshes import build_atlas
+    from gnv.convert.volume_meshes import build_atlas
 
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -157,7 +157,7 @@ def start_fibers(source, name, keep_percent=None):
 
 
 def _run_fibers(source, out, label, keep_percent):
-    from calvin_utils.neuroimaging_utils.tract_utils.fiber_set import build_fiber_set
+    from gnv.convert.fiber_set import build_fiber_set
 
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +233,7 @@ def _run_levels(path):
 
 
 def _run(source, mm, name):
-    from calvin_utils.plotting_utils.backdrops import build_backdrop, list_backdrops
+    from gnv.convert.backdrops import build_backdrop, list_backdrops
 
     try:
         out = Path(build_backdrop(source, out_dir=BACKDROP_DIR, mm=mm, name=name, progress=_report))

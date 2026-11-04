@@ -41,7 +41,7 @@ a = Analysis(
     datas=datas,
     # Imported by name at run time, out of the analyser's sight. (All of VTK
     # comes along regardless: the viewer imports it as ``import vtk``.)
-    hiddenimports=collect_submodules("gnv") + ["calvin_utils.neuroimaging_utils.nifti_utils.parcel_meshes"],
+    hiddenimports=collect_submodules("gnv"),
     # Optional imports of the libraries above that the viewer never uses.
     excludes=["torch", "jax", "tensorflow", "keras", "IPython", "notebook", "jupyterlab", "cv2", "imageio_ffmpeg", "sklearn", "tkinter"],
     noarchive=False,

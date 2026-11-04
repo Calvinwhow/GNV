@@ -151,10 +151,10 @@ def start_server(project):
     """Serve the viewer from a background thread. ``(server, url)``."""
     from werkzeug.serving import make_server
 
-    from .app import create_app, require_renderer
+    from .app import create_app, require_circuit_pyper
     from .spec import load_spec
 
-    require_renderer()
+    require_circuit_pyper()
     app = create_app(load_spec(project) if project else None)
     port = PREFERRED_PORT if port_is_free(PREFERRED_PORT) else free_port()
     server = make_server(HOST, port, app, threaded=True)

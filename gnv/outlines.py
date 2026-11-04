@@ -67,7 +67,7 @@ def outline_mask(overlay):
     outline sits at the bar's lower limit. Blurred by ``outline_smooth``
     voxels so a traced edge reads as a boundary rather than as the grid.
     """
-    from calvin_utils.plotting_utils.mesh_paint import _select, _volume
+    from gnv.render.mesh_paint import _select, _volume
     from gnv import volume_render as vr
 
     floor = colour_floor(overlay)

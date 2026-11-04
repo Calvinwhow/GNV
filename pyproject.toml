@@ -15,6 +15,9 @@ dependencies = [
     "numpy",
     "pillow",
     "matplotlib",
+    "h5py",
+    "scikit-image",
+    "calvin_utils @ git+https://github.com/Calvinwhow/CircuitPyPer.git@development",
 ]
 
 [project.scripts]

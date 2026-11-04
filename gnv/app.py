@@ -162,7 +162,7 @@ def create_app(spec=None, drop_dir=None):
     def api_electrode_poses():
         """Each lead's trajectory as its file places it: what the orientation
         controls start from, and what Reset returns to."""
-        from calvin_utils.plotting_utils.electrode_render import electrode_poses
+        from gnv.render.electrode_render import electrode_poses
         from .paths import ELECTRODE_DIR
 
         try:
@@ -173,7 +173,7 @@ def create_app(spec=None, drop_dir=None):
     @app.get("/api/electrode/models")
     def api_electrode_models():
         """The lead models shipped with the viewer, for the Lead model picker."""
-        from calvin_utils.plotting_utils.electrode_render import available_models
+        from gnv.render.electrode_render import available_models
         from .paths import ELECTRODE_DIR
 
         return jsonify(available_models(ELECTRODE_DIR))
@@ -267,10 +267,10 @@ def create_app(spec=None, drop_dir=None):
         elif lower.endswith(".gnvpack"):
             kind = "pack"           # installed by the page with /api/packs/install
         elif lower.endswith((".mat", ".json")):
-            from calvin_utils.plotting_utils.electrode_render import (
+            from gnv.render.electrode_render import (
                 looks_like_electrode,
             )
-            from calvin_utils.plotting_utils.fiber_render import is_descriptor
+            from calvin_utils.neuroimaging_utils.tract_utils.fiber_descriptor import is_descriptor
 
             # A .json here is either a fibre-value descriptor or an electrode
             # reconstruction, and a .mat is either a lead or a tractogram. All
@@ -295,7 +295,7 @@ def create_app(spec=None, drop_dir=None):
         being checked -- the values' SHA-256 and the atlas' size -- and those
         need the files, which the browser never has.
         """
-        from calvin_utils.plotting_utils.fiber_render import read_descriptor
+        from calvin_utils.neuroimaging_utils.tract_utils.fiber_descriptor import read_descriptor
 
         path = request.args.get("path", "")
         try:
@@ -428,7 +428,7 @@ def create_app(spec=None, drop_dir=None):
 
     @app.get("/api/palettes")
     def api_palettes():
-        from calvin_utils.plotting_utils.palettes import (
+        from gnv.render.palettes import (
             CLUT_DIRS, palette_catalogue,
         )
 
@@ -643,17 +643,12 @@ def create_app(spec=None, drop_dir=None):
     return app
 
 
-def require_renderer():
-    """Stop with instructions when circuit_pyper's renderer is missing."""
+def require_circuit_pyper():
+    """Stop with instructions when circuit_pyper, which reads the tract file formats, is missing."""
     try:
-        import calvin_utils.plotting_utils.brains  # noqa: F401
+        import calvin_utils.neuroimaging_utils.tract_utils.fiber_converter  # noqa: F401
     except ImportError as exc:
-        raise SystemExit(
-            "gnv draws with circuit_pyper's renderer, which is not "
-            f"importable here ({exc}).\n"
-            "Install it, or run this from an environment that has it:\n"
-            "    pip install -e /path/to/calvin_utils_project/circuit_pyper"
-        )
+        raise SystemExit(f"gnv reads tract files with circuit_pyper (calvin_utils), which is not importable here ({exc}).\nInstall the viewer with its dependencies (see SETUP in the README):\n    pip install -e .")
 
 
 def main(argv=None):
@@ -667,7 +662,7 @@ def main(argv=None):
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
 
-    require_renderer()
+    require_circuit_pyper()
 
     spec = load_spec(args.project) if args.project else None
     app = create_app(spec)

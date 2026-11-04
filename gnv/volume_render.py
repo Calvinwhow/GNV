@@ -302,7 +302,7 @@ def load_grid(source, factor=1, smooth_vox=0.0, labels=None):
     if _is_backdrop(source):
         data, affine = _backdrop_level(source, factor)
     else:
-        from calvin_utils.plotting_utils.mesh_paint import _volume
+        from gnv.render.mesh_paint import _volume
 
         data, affine = _volume(source)
         data = np.asarray(data, np.float32)
@@ -454,7 +454,7 @@ def _backdrop_level_unlocked(path, factor, progress=None):
     a time, so nothing larger than the level being built is ever resident: a
     100 um template is read once, never held.
     """
-    from calvin_utils.plotting_utils.backdrops import Backdrop
+    from gnv.convert.backdrops import Backdrop
 
     path = str(Path(path).expanduser())
     with Backdrop(path) as store:
@@ -913,7 +913,7 @@ def _on_grid(grid, nifti, smooth_vox=0.0):
     Cached on the file, its mtime and the target grid, so editing a threshold
     or a palette resamples nothing.
     """
-    from calvin_utils.plotting_utils.mesh_paint import _volume
+    from gnv.render.mesh_paint import _volume
 
     path = str(nifti)
     key = (path, _stamp(path), tuple(grid.dimensions),
@@ -1013,7 +1013,7 @@ def _native(overlay):
     export level, in both overlay modes, whatever smoothing is applied. A
     resampled copy's extremes move with the grid; the map's own do not.
     """
-    from calvin_utils.plotting_utils.mesh_paint import _select, _volume
+    from gnv.render.mesh_paint import _select, _volume
 
     path = str(overlay["nifti"])
     band = (overlay["sign"], bool(overlay["absolute"]), overlay["threshold"],
@@ -1133,7 +1133,7 @@ def _pinned(overlay, finite):
     first. A user-entered scale is left untouched, reversed or not, because a
     reversed pair is how a scale is inverted.
     """
-    from calvin_utils.plotting_utils.overlay_paint import scale_for
+    from gnv.render.overlay_paint import scale_for
 
     out = dict(overlay)
     if finite.size:
@@ -1153,7 +1153,7 @@ def body_cmap(layer):
     brightness and takes the tint's hue, so sulci, grey and white matter still
     read as they do in greys -- in sepia, or blue, or whatever was picked.
     """
-    from calvin_utils.plotting_utils.palettes import resolve_palette
+    from gnv.render.palettes import resolve_palette
 
     base = resolve_palette(layer.get("cmap") or "gray", fallback_color="#b7bcc4")
     tint = layer.get("color")
@@ -1239,8 +1239,8 @@ def _overlay_tfs(span, finite, overlay, fade, levels8=None):
     in level units, so the same colours land on the same values.
     """
     import vtk
-    from calvin_utils.plotting_utils.mesh_paint import _select
-    from calvin_utils.plotting_utils.overlay_paint import overlay_colours
+    from gnv.render.mesh_paint import _select
+    from gnv.render.overlay_paint import overlay_colours
 
     band = dict(threshold=overlay["threshold"], max_value=overlay.get("max_value"))
     pinned = _pinned(overlay, finite)
@@ -1592,8 +1592,8 @@ def _painted_data(grid, values, layer, overlays):
     Only voxels some overlay selects go through the suite -- compositing is
     per voxel -- so the cost follows the size of the blobs, not of the level.
     """
-    from calvin_utils.plotting_utils.mesh_paint import _select
-    from calvin_utils.plotting_utils.overlay_paint import composite, overlay_colours
+    from gnv.render.mesh_paint import _select
+    from gnv.render.overlay_paint import composite, overlay_colours
 
     lo, hi = body_window(values, _layer_clim(layer))
     cmap = body_cmap(layer)

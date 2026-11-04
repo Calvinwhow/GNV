@@ -4,7 +4,7 @@ Resources live in two roots with the same layout:
 
     resources/                  what ships with the viewer (read-only once packaged)
     <library>/                  this user's: conversions, installed packs, anything big
-        meshes/index.json       the Mesh dropdown (see calvin_utils.resource_index)
+        meshes/index.json       the Mesh dropdown (see gnv.resource_index)
         meshes/brain_surfaces/  surface meshes
         meshes/atlases/         folders of region meshes
         meshes/<any folder>/    any other meshes, listed in the index
@@ -70,7 +70,7 @@ def index(kind):
     its index entry with absolute paths, plus ``root`` (the folder its paths are
     under) and ``shipped``. A library entry with the name of a shipped one takes
     its place."""
-    from calvin_utils.resource_index import read_index, sections
+    from gnv.resource_index import read_index, sections
 
     found = {}
     for root in dict.fromkeys((RESOURCE_DIR, LIBRARY_DIR)):
@@ -89,7 +89,7 @@ def entries(kind):
 def add_entry(kind, entry):
     """Enter ``entry`` (with its ``section``; paths relative to the library's
     ``kind`` folder) in the library's index for ``kind``."""
-    from calvin_utils.resource_index import add_entry as add
+    from gnv.resource_index import add_entry as add
 
     add(LIBRARY_DIR / kind, entry)
 

@@ -1,14 +1,28 @@
 # General Neuroimage Viewer
 
-A layered viewer for brain figures.  It draws with the same off-screen PyVista
-renderer as `circuit_pyper`, so what you arrange here is pixel-for-pixel what
-the export writes -- the app is a control panel, not a second renderer.
+A layered viewer for brain figures.  It draws with its own off-screen PyVista
+renderer (`gnv.render`), the same one the export uses, so what you arrange here
+is pixel-for-pixel what the export writes.  Converting what it shows -- NIfTIs to
+meshes and slice archives, atlases, fibre sets -- is `gnv.convert`.  The tract
+file formats (.tck, .trk, Lead-DBS .mat, and the .npz + .fib.npy + .fib.json
+results) are read by `circuit_pyper` (`calvin_utils`), installed with the viewer
+in its light form.
+
+SETUP (once, from the repository folder)
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .        # the viewer, its renderer, and circuit_pyper (from GitHub)
+```
+Everything the viewer needs is in `pyproject.toml`, circuit_pyper included, so
+this one install is the whole setup.
 
 STARTUP
 ```bash
-pip install -e .
+source .venv/bin/activate
 gnv                     # opens http://127.0.0.1:8731
 gnv figure.json         # ... with a saved figure loaded
+python scripts/launch.py   # the same, in its own app window
 ```
 
 SHUTOFF 
@@ -16,8 +30,8 @@ SHUTOFF
 lsof -ti :8731 | xargs kill
 ```
 
-It needs `circuit_pyper` importable in the same environment; that is where the
-meshes, the volume sampling and the colour rules live.
+It needs `circuit_pyper` importable in the same environment (SETUP above): that
+is where the tract file formats are read.
 
 ## The model
 
