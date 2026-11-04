@@ -1,7 +1,0 @@
-flask>=3.0
-pyvista>=0.44
-nibabel
-scipy
-numpy
-pillow
-matplotlib
