@@ -69,8 +69,8 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             "dist/General Neuroimage Viewer.app/Contents/MacOS/GeneralNeuroimageViewer" --check
           else
-            dist/GeneralNeuroimageViewer/GeneralNeuroimageViewer.exe --check || { cat "$GNV_HOME/launcher.log"; exit 1; }
-            cat "$GNV_HOME/launcher.log"
+            dist/GeneralNeuroimageViewer/GeneralNeuroimageViewer.exe --check || { cat "$GNV_HOME/launcher.log" 2>/dev/null; exit 1; }
+            cat "$GNV_HOME/launcher.log" 2>/dev/null || true
           fi
 
       - name: Package for macOS (drag-to-Applications disk image)
