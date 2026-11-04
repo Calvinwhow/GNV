@@ -601,10 +601,10 @@ def _backdrop_path(name):
     text = str(name)
     if text.lower().endswith(".npz") or "/" in text:
         return str(Path(text).expanduser())
-    from circuit_viewer.paths import BACKDROP_DIR
+    from circuit_viewer.paths import prepared_backdrops
 
-    found = Path(BACKDROP_DIR) / f"{text}.npz"
-    return str(found) if found.is_file() else text
+    found = prepared_backdrops().get(text)
+    return str(found) if found is not None else text
 
 
 def _label(source):

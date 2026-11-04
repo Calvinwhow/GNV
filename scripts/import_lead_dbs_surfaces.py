@@ -1,10 +1,12 @@
-"""Normalize a Lead-DBS surface bundle into circuit_viewer mesh resources."""
+"""Normalize a Lead-DBS surface bundle into a meshes folder: the surfaces go in
+brain_surfaces/lead_dbs/, and each gets an entry in the folder's index.json.
+By default that is the library's (circuit_viewer/paths.py), since these
+surfaces are not shipped with the viewer."""
 
 from __future__ import annotations
 
 import argparse
 import gzip
-import json
 import struct
 from pathlib import Path
 
@@ -12,7 +14,8 @@ import numpy as np
 import pyvista as pv
 from scipy.io import loadmat
 
-from circuit_viewer.paths import MESH_DIR
+from calvin_utils.resource_index import add_entry
+from circuit_viewer.paths import LIBRARY_DIR
 
 
 def polydata(points, triangles):
@@ -106,8 +109,9 @@ def matlab_group(source, output, annotations=None):
         save(mesh, Path(output) / f"{side}.vtk")
 
 
-def import_bundle(source, output):
-    source, output = Path(source).expanduser(), Path(output).expanduser()
+def import_bundle(source, meshes):
+    source, meshes = Path(source).expanduser(), Path(meshes).expanduser()
+    output = meshes / "brain_surfaces" / "lead_dbs"
     if not source.is_dir():
         raise FileNotFoundError(source)
     output.mkdir(parents=True, exist_ok=True)
@@ -135,42 +139,19 @@ def import_bundle(source, output):
     matlab_group(source / "CortexLowRes_15000V.mat",
                  output / "CortexLowRes_15000V")
 
-    catalogue = {
-        "BrainMesh_Ch2.vtp": {
-            "label": "BrainMesh_Ch2",
-            "what": "Lead-DBS Ch2 whole-brain surface",
-        },
-        "BrainMesh_ICBM152_tal.vtp": {
-            "label": "BrainMesh_ICBM152_tal",
-            "what": "Lead-DBS ICBM152 Talairach whole-brain surface",
-        },
-        "brainMeshRight.vtp": {
-            "label": "brainMeshRight",
-            "what": "Lead-DBS right-hemisphere brain surface",
-        },
-        "surf.vtp": {
-            "label": "surf",
-            "what": "Lead-DBS combined cortical surface",
-        },
-        "surf.rh.ply.vtp": {
-            "label": "surf.rh.ply",
-            "what": "Lead-DBS right-hemisphere PLY surface variant",
-        },
-        "surf.lh-rh": {
-            "label": "surf.lh + surf.rh",
-            "what": "Lead-DBS bilateral cortical surface pair",
-        },
-        "CortexHiRes": {
-            "label": "CortexHiRes",
-            "what": "Lead-DBS bilateral high-resolution cortex with DKT labels",
-        },
-        "CortexLowRes_15000V": {
-            "label": "CortexLowRes_15000V",
-            "what": "Lead-DBS bilateral low-resolution 15,000-vertex cortex",
-        },
-    }
-    (output / "catalogue.json").write_text(
-        json.dumps(catalogue, indent=2) + "\n")
+    # Each surface becomes an entry in the meshes folder's index: the Mesh dropdown.
+    folder = output.relative_to(meshes).as_posix()
+    for name, label, hint, piece in (
+        ("leaddbs_ch2", "Ch2 whole brain", "Lead-DBS Ch2 whole-brain surface", "BrainMesh_Ch2.vtp"),
+        ("leaddbs_icbm152", "ICBM152 whole brain", "Lead-DBS ICBM152 Talairach whole-brain surface", "BrainMesh_ICBM152_tal.vtp"),
+        ("leaddbs_surf", "Combined cortex", "Lead-DBS combined cortical surface", "surf.vtp"),
+        ("leaddbs_cortex_hires", "Cortex, high resolution (DKT)", "Lead-DBS bilateral high-resolution cortex, DKT labels", "CortexHiRes"),
+        ("leaddbs_cortex_lowres", "Cortex, 15,000 vertices", "Lead-DBS bilateral cortex, 15,000 vertices", "CortexLowRes_15000V"),
+        ("leaddbs_surf_lh_rh", "Cortex, left/right pair", "Lead-DBS bilateral cortical surface pair", "surf.lh-rh"),
+        ("leaddbs_right", "Right hemisphere", "Lead-DBS right-hemisphere brain surface", "brainMeshRight.vtp"),
+        ("leaddbs_surf_rh_ply", "Right hemisphere (PLY variant)", "Lead-DBS right-hemisphere PLY surface variant", "surf.rh.ply.vtp"),
+    ):
+        add_entry(meshes, {"name": name, "section": "Lead-DBS surfaces", "label": label, "hint": hint, "family": "surface", "pieces": [f"{folder}/{piece}"]})
 
     manifest = """# Imported Lead-DBS surfaces
 
@@ -193,10 +174,9 @@ Not imported:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("source", help="directory containing the Lead-DBS bundle")
-    parser.add_argument("--output", type=Path,
-                        default=MESH_DIR / "cool_surfaces")
+    parser.add_argument("--meshes", type=Path, default=LIBRARY_DIR / "meshes", help="the meshes folder to import into")
     args = parser.parse_args()
-    import_bundle(args.source, args.output)
+    import_bundle(args.source, args.meshes)
 
 
 if __name__ == "__main__":

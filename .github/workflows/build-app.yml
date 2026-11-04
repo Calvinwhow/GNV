@@ -1,0 +1,117 @@
+name: Build app
+
+# Builds the viewer for macOS (Apple Silicon and Intel) and Windows on every
+# push to main, and attaches the builds to a GitHub Release when a v* tag is
+# pushed (git tag v0.2.0 && git push --tags). See packaging/README.md.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: write          # only used to attach builds to a release on a v* tag
+
+env:
+  # The renderer. CIRCUITPYPER_TOKEN (a repository secret) is only needed while
+  # CircuitPyPer is private: a fine-grained token with read access to it.
+  CIRCUITPYPER_REPO: github.com/Calvinwhow/CircuitPyPer.git
+  CIRCUITPYPER_REF: development
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS-arm64
+            runner: macos-15
+          - name: macOS-x64
+            runner: macos-15-intel
+          - name: Windows-x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: packaging/requirements.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -r packaging/requirements.txt
+
+      - name: Install the renderer (CircuitPyPer, without its research stack)
+        env:
+          TOKEN: ${{ secrets.CIRCUITPYPER_TOKEN }}
+        run: python -m pip install --no-deps "git+https://${TOKEN:+x-access-token:${TOKEN}@}${CIRCUITPYPER_REPO}@${CIRCUITPYPER_REF}"
+
+      - name: Fetch the cortical surfaces to ship
+        run: python packaging/fetch_yabplot_surfaces.py
+
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean packaging/CircuitViewer.spec
+
+      - name: Check the build serves its data
+        env:
+          CIRCUIT_VIEWER_HOME: ${{ runner.temp }}/cv-home
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            "dist/Circuit Viewer.app/Contents/MacOS/CircuitViewer" --check
+          else
+            dist/CircuitViewer/CircuitViewer.exe --check || { cat "$CIRCUIT_VIEWER_HOME/launcher.log"; exit 1; }
+            cat "$CIRCUIT_VIEWER_HOME/launcher.log"
+          fi
+
+      - name: Package for macOS (drag-to-Applications disk image)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist/dmg
+          cp -R "dist/Circuit Viewer.app" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "Circuit Viewer" -srcfolder dist/dmg -ov -format UDZO "dist/CircuitViewer-${{ matrix.name }}.dmg"
+          echo "PACKAGE=dist/CircuitViewer-${{ matrix.name }}.dmg" >> "$GITHUB_ENV"
+
+      - name: Package for Windows (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\CircuitViewer" -DestinationPath "dist\CircuitViewer-${{ matrix.name }}.zip"
+          "PACKAGE=dist/CircuitViewer-${{ matrix.name }}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload build
+        uses: actions/upload-artifact@v7
+        with:
+          name: CircuitViewer-${{ matrix.name }}
+          path: ${{ env.PACKAGE }}
+          if-no-files-found: error
+
+  release:
+    name: Attach builds to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download builds
+        uses: actions/download-artifact@v7
+        with:
+          path: builds
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" builds/* --repo "$GITHUB_REPOSITORY" --title "Circuit Viewer $GITHUB_REF_NAME" --generate-notes

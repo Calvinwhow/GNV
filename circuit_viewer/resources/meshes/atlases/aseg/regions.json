@@ -1,0 +1,19 @@
+{
+  "about": "FreeSurfer aseg subcortical structures (from yabplot).",
+  "entries": [
+    {"name": "Left-Accumbens-area", "section": "Basal ganglia", "hint": "Nucleus accumbens"},
+    {"name": "Right-Accumbens-area", "section": "Basal ganglia", "hint": "Nucleus accumbens"},
+    {"name": "Left-Caudate", "section": "Basal ganglia", "hint": "Caudate nucleus"},
+    {"name": "Right-Caudate", "section": "Basal ganglia", "hint": "Caudate nucleus"},
+    {"name": "Left-Putamen", "section": "Basal ganglia", "hint": "Putamen"},
+    {"name": "Right-Putamen", "section": "Basal ganglia", "hint": "Putamen"},
+    {"name": "Left-Pallidum", "section": "Basal ganglia", "hint": "Globus pallidus"},
+    {"name": "Right-Pallidum", "section": "Basal ganglia", "hint": "Globus pallidus"},
+    {"name": "Left-Thalamus", "section": "Thalamus", "hint": "Thalamus"},
+    {"name": "Right-Thalamus", "section": "Thalamus", "hint": "Thalamus"},
+    {"name": "Left-Hippocampus", "section": "Medial temporal", "hint": "Hippocampus"},
+    {"name": "Right-Hippocampus", "section": "Medial temporal", "hint": "Hippocampus"},
+    {"name": "Left-Amygdala", "section": "Medial temporal", "hint": "Amygdala"},
+    {"name": "Right-Amygdala", "section": "Medial temporal", "hint": "Amygdala"}
+  ]
+}

@@ -1,0 +1,16 @@
+# What the packaged viewer needs, and the tool that packages it. The renderer
+# (CircuitPyPer's calvin_utils) is installed separately with --no-deps: the
+# viewer uses its plotting modules, not its research stack.
+pyinstaller>=6.10
+flask>=3.0
+pyvista>=0.44
+vtk
+numpy
+scipy
+nibabel
+h5py
+pillow
+matplotlib
+scikit-image
+yabplot>=0.6
+pooch

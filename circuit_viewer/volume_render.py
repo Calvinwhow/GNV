@@ -137,20 +137,11 @@ import threading as _threading
 _LEVEL_LOCK = _threading.RLock()
 
 
-def _backdrop_dir():
-    try:
-        from circuit_viewer.paths import BACKDROP_DIR
-    except ImportError:         # pragma: no cover - used outside the package
-        from calvin_utils.plotting_utils.backdrops import BACKDROP_DIR
-    return Path(BACKDROP_DIR).expanduser()
-
-
 def _backdrops():
-    """``{name: path}`` for every prepared backdrop in the library folder."""
-    folder = _backdrop_dir()
-    if not folder.is_dir():
-        return OrderedDict()
-    return OrderedDict((p.stem, p) for p in sorted(folder.glob("*.npz")))
+    """``{name: path}`` for every prepared backdrop, shipped and this user's."""
+    from circuit_viewer.paths import prepared_backdrops
+
+    return OrderedDict(prepared_backdrops())
 
 
 def library():
@@ -158,22 +149,21 @@ def library():
     prepared backdrop. Each entry says how it will be drawn, so the panel can
     say so: ``mm`` is its own voxel size, ``preview_mm`` and ``export_mm`` the
     levels it is drawn at while working and for hi-res / export."""
+    from circuit_viewer.paths import index
+
     out = []
-    entries = [(name, path, "packaged") for name, path in LIBRARY.items()]
-    entries += [(name, path, "backdrop") for name, path in _backdrops().items()
-                if name not in LIBRARY]
-    for name, path, kind in entries:
+    entries = [(name, path, "packaged", "Packaged volumes", f"{name} (packaged)", "") for name, path in LIBRARY.items()]
+    entries += [(e["name"], Path(e["file"]), "backdrop", s["label"], e.get("label", e["name"]), e.get("hint", "")) for s in index("backdrops") for e in s["entries"] if e["name"] not in LIBRARY]
+    for name, path, kind, section, label, hint in entries:
         if not Path(path).is_file():
             continue
-        item = {"name": name, "path": str(path), "kind": kind}
+        item = {"name": name, "path": str(path), "kind": kind, "section": section, "label": label, "hint": hint}
         try:
             shape, mm = source_shape(path)
             coarse, fine = levels(shape)
             item.update(shape=list(shape), mm=mm, preview_mm=mm * coarse,
                         export_mm=mm * fine,
                         levels_ready=levels_ready(path))
-            item["label"] = (f"{name} (packaged)" if kind == "packaged"
-                             else f"{name} · {mm:.3g} mm backdrop")
         except Exception as exc:          # an unreadable archive is listed, not fatal
             item["label"] = f"{name} (unreadable: {exc})"
         out.append(item)

@@ -1,0 +1,27 @@
+{
+  "about": "The Mesh dropdown, one entry per line: name (what a figure saves), section (the heading it is listed under), label (the name the list shows), hint (the line shown under it) and its files, relative to this folder. See calvin_utils/resource_index.py.",
+  "entries": [
+    {"name": "pial", "section": "Cortex", "label": "Pial cortex", "hint": "yabplot pial cortex, cortex only", "family": "surface", "pieces": ["pial"]},
+    {"name": "midthickness", "section": "Cortex", "label": "Midthickness cortex", "hint": "yabplot midthickness cortex, cortex only", "family": "surface", "pieces": ["midthickness"]},
+    {"name": "white", "section": "Cortex", "label": "White-matter surface", "hint": "yabplot white-matter surface, cortex only", "family": "surface", "pieces": ["white"]},
+    {"name": "inflated", "section": "Cortex", "label": "Inflated cortex", "hint": "yabplot inflated cortex, cortex only", "family": "surface", "pieces": ["inflated"]},
+    {"name": "very_inflated", "section": "Cortex", "label": "Very inflated cortex", "hint": "yabplot very-inflated cortex, cortex only", "family": "surface", "pieces": ["very_inflated"]},
+    {"name": "pial_wholebrain", "section": "Whole brain", "label": "Pial whole brain", "hint": "pial cortex + eroded SUIT cerebellum + brainstem", "family": "surface", "pieces": ["pial", "brain_surfaces/pial_cerebellum.vtk", "brain_surfaces/brainstem.vtk"]},
+    {"name": "midthickness_wholebrain", "section": "Whole brain", "label": "Midthickness whole brain", "hint": "midthickness cortex + eroded SUIT cerebellum + brainstem", "family": "surface", "pieces": ["midthickness", "brain_surfaces/pial_cerebellum.vtk", "brain_surfaces/brainstem.vtk"]},
+    {"name": "inflated_wholebrain", "section": "Whole brain", "label": "Inflated whole brain", "hint": "inflated cortex + eroded SUIT cerebellum + brainstem", "family": "surface", "pieces": ["inflated", "brain_surfaces/pial_cerebellum.vtk", "brain_surfaces/brainstem.vtk"]},
+    {"name": "pial_medial", "section": "Whole brain", "label": "Pial whole brain + inner core", "hint": "pial whole brain + inner core; for medial views", "family": "surface", "pieces": ["pial", "brain_surfaces/pial_cerebellum.vtk", "brain_surfaces/brainstem.vtk", "brain_surfaces/subcortex.vtk"]},
+    {"name": "subcortex", "section": "Whole brain", "label": "Solid inner core", "hint": "solid inner core; hides the interior, planar at the midline", "family": "surface", "pieces": ["brain_surfaces/subcortex.vtk"]},
+    {"name": "glass_wholebrain", "section": "Whole brain", "label": "Glass brain (carved)", "hint": "carved translucent hull + cerebellum; no gyral detail", "family": "surface", "pieces": ["brain_surfaces/glass_cerebrum.vtk", "brain_surfaces/glass_cerebellum.vtk"]},
+    {"name": "plain_wholebrain", "section": "Whole brain", "label": "Glass brain (plain)", "hint": "uncarved translucent hull + cerebellum; no gyral detail", "family": "surface", "pieces": ["brain_surfaces/plain_cerebrum.vtk", "brain_surfaces/glass_cerebellum.vtk"]},
+    {"name": "aal3_suit_parcels", "section": "Atlases", "label": "AAL3 + SUIT, 165 regions", "hint": "AAL3 fine cerebral + SUIT cerebellar, 165 region meshes", "family": "subcortex", "parcels": "atlases/aal3_suit"},
+    {"name": "suit_parcels", "section": "Atlases", "label": "SUIT cerebellum, 32 regions", "hint": "SUIT cerebellar parcels, 32 region meshes", "family": "subcortex", "parcels": "atlases/suit"},
+    {"name": "aal3_subcortical", "section": "Atlases", "label": "AAL3 subcortical", "hint": "AAL3 subcortical structures, 78 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/aal3_subcortical"},
+    {"name": "aal3_nocer", "section": "Atlases", "label": "AAL3 subcortical, no cerebellum", "hint": "AAL3 subcortical structures, without the cerebellum, 52 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/aal3_nocer"},
+    {"name": "aseg", "section": "Atlases", "label": "FreeSurfer aseg", "hint": "FreeSurfer aseg subcortical structures, 14 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/aseg"},
+    {"name": "tian2020_s1", "section": "Atlases", "label": "Tian 2020, scale 1", "hint": "Melbourne subcortex atlas (Tian 2020), scale 1, 16 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/tian2020_s1"},
+    {"name": "musus100", "section": "Atlases", "label": "Melbourne subcortex", "hint": "Melbourne subcortex atlas, 84 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/musus100"},
+    {"name": "brainnetome_sc", "section": "Atlases from yabplot (downloaded on first use)", "label": "Brainnetome subcortical", "hint": "yabplot Brainnetome subcortical structures", "family": "subcortex", "yabplot_atlas": "brainnetome_sc"},
+    {"name": "musus100_dbn", "section": "Atlases from yabplot (downloaded on first use)", "label": "Melbourne deep-brain nuclei", "hint": "yabplot Melbourne deep-brain nuclei", "family": "subcortex", "yabplot_atlas": "musus100_dbn"},
+    {"name": "musus100_tha", "section": "Atlases from yabplot (downloaded on first use)", "label": "Melbourne thalamic nuclei", "hint": "yabplot Melbourne thalamic nuclei", "family": "subcortex", "yabplot_atlas": "musus100_tha"}
+  ]
+}

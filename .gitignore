@@ -1,0 +1,13 @@
+# Your library: conversions, installed packs, big volumes -- never committed
+# (circuit_viewer/paths.py).
+circuit_viewer/library/
+
+# Build products (packaging/README.md), and the cortical surfaces the build fetches.
+build/
+dist/
+circuit_viewer/resources/yabplot/
+
+# Half-written files, while a conversion or install is running.
+*.partial
+*.building.raw
+.DS_Store

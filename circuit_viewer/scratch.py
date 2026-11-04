@@ -1,9 +1,9 @@
 """Every temporary file circuit_viewer writes, in one place it owns.
 
-Only PREPARED bodies (``resources/backdrops``: the converter's ``.npz`` and
-their level sidecars) are kept between runs. Everything else the viewer makes
+Only PREPARED backdrops and atlases (the library, see ``paths``: the ``.npz``, their
+level sidecars, region meshes) are kept between runs. Everything else the viewer makes
 -- uploaded drops, the per-frame copies a 4D map plays from, mosaic helper
-masks -- lives under ``SCRATCH_ROOT`` (``circuit_viewer/scratch`` by default,
+masks -- lives under ``SCRATCH_ROOT`` (``scratch`` in ``paths.USER_DIR`` by default,
 ``$CIRCUIT_VIEWER_SCRATCH`` to move it), in a folder for this process alone:
 
     scratch/
@@ -46,13 +46,13 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from .paths import PACKAGE_DIR
+from .paths import USER_DIR
 
 __all__ = ["SCRATCH_ROOT", "area", "run_dir", "sweep", "touch", "protect",
            "cleanup", "usage"]
 
 SCRATCH_ROOT = Path(os.environ.get("CIRCUIT_VIEWER_SCRATCH")
-                    or PACKAGE_DIR / "scratch").expanduser()
+                    or USER_DIR / "scratch").expanduser()
 BUDGET_BYTES = int(float(os.environ.get("CIRCUIT_VIEWER_SCRATCH_MB", 4096)) * 2 ** 20)
 FRAME_IDLE_S = 10 * 60
 DROP_IDLE_S = 30 * 60

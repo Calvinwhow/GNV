@@ -33,60 +33,82 @@ import hashlib
 import io
 import json
 import os
+import re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
+from .paths import ELECTRODE_DIR
 from .spec import camera_direction, normalize_spec
 
-__all__ = ["RenderSession", "catalogue", "region_names", "side_of", "ink_for"]
+__all__ = ["RenderSession", "catalogue", "region_names", "tract_names", "side_of", "ink_for"]
 
 
 def region_names(mesh, iso=None, split="auto", presmooth_vox=None):
-    """The regions a group contains, each with its side and its coarse group.
+    """The regions a group contains, each with its side, its section and its hint.
 
-    ``group`` is None for any atlas whose naming this does not recognise, and
-    the panel then offers no supra-region controls rather than one catch-all
-    bucket that would hide half the atlas behind a misleading label.
+    An atlas folder's ``regions.json`` (``read_regions``) gives each region the
+    section the Regions list groups it under -- toggled as one -- and a hint
+    naming it in full, and the list follows that file's order. A set without
+    one falls back to ``supra_region``'s name rules (AAL3, SUIT); ``section`` is
+    None for a region neither names, and the panel then offers no section
+    control for it rather than one catch-all bucket.
     """
     from calvin_utils.plotting_utils.brains import supra_region
+    from calvin_utils.resource_index import read_regions
 
-    group = resolve_meshes(mesh, iso=iso, split=split,
-                           presmooth_vox=presmooth_vox)
-    return [{"name": name, "side": side_of(name, part),
-             "group": supra_region(name)}
-            for name, part in group.items()]
+    group = resolve_meshes(mesh, iso=iso, split=split, presmooth_vox=presmooth_vox)
+    folder = _region_folder(mesh)
+    table = read_regions(folder) if folder else {}
+    rows = [{"name": name, "side": side_of(name, part), "section": table.get(name, {}).get("section") if table else supra_region(name), "hint": table.get(name, {}).get("hint", "")} for name, part in group.items()]
+    rank = {name: i for i, name in enumerate(table)}
+    return sorted(rows, key=lambda row: rank.get(row["name"], len(rank)))
 
 
-def region_dir(spec):
-    """The directory of region meshes for a registered set, or None.
+def _region_folder(mesh):
+    """The folder of region meshes ``mesh`` names -- a Mesh list entry or a
+    folder path -- or None for anything else (a NIfTI, several files)."""
+    from .paths import entries
 
-    Locally built sets ship beside the package. The yabplot-packaged ones live
-    in yabplot's download cache, and asking yabplot where it put them is what
-    makes aseg, Tian and the Melbourne atlases usable here too rather than being
-    listed and then failing to load.
+    if not isinstance(mesh, str):
+        return None
+    spec = entries("meshes").get(mesh)
+    if spec is not None:
+        return region_dir(spec)
+    path = Path(mesh).expanduser()
+    return path if path.is_dir() else None
+
+
+def region_dir(spec, fetch=False):
+    """The directory of region meshes for a mesh index entry, or None.
+
+    An entry's ``parcels`` names its folder. One of yabplot's sets
+    (``yabplot_atlas``) lives in yabplot's download cache: found there when it
+    has been downloaded, and -- only with ``fetch`` -- downloaded when it has
+    not, which needs the internet. Listing the meshes never fetches; drawing
+    one does.
     """
-    from calvin_utils.plotting_utils.brains import RESOURCE_DIR
-
     if "parcels" in spec:
-        path = RESOURCE_DIR / spec["parcels"]
+        path = Path(spec["parcels"])
         return path if path.is_dir() else None
 
     atlas = spec.get("yabplot_atlas")
     if not atlas:
         return None
     try:
-        from yabplot.data import _find_subcortical_files
+        from yabplot.data import GOODBOY, _find_subcortical_files, _resolve_resource_path
+
+        cached = Path(GOODBOY.path) / f"subcortical-{atlas}"
+        if not fetch and not (cached / ".registry_hash").is_file():
+            return None
+        files = _find_subcortical_files(str(_resolve_resource_path(atlas, "subcortical") if fetch else cached))
     except Exception:
         return None
-    try:
-        files = _find_subcortical_files(atlas)
-    except Exception:
-        return None
-    paths = [Path(f) for f in (files or [])]
-    return paths[0].parent if paths else None
+    # {region name: file}; the files sit together in one folder of the download.
+    return Path(next(iter(files.values()))).parent if files else None
+
 
 # Fields that change the numbers. Anything not listed here is style, and style
 # never invalidates the geometry cache.
@@ -98,7 +120,7 @@ _GEOMETRY_KEYS = ("mesh", "tessellate", "iso", "split", "presmooth_vox",
                   "section_cap")
 _LOAD_KEYS = ("mesh", "iso", "split", "presmooth_vox")
 _FIBER_KEYS = ("source", "fiber_atlas_path", "sign", "min_abs_value",
-               "max_abs_value", "top_percent", "max_lines", "step", "smooth")
+               "max_abs_value", "top_percent", "max_lines", "step", "smooth", "hidden_regions")
 # How many cached builds no open layer uses are kept anyway (most recent first):
 # enough to step a slider back without rebuilding, few enough that a long
 # session does not hold every value it passed through. A loaded fibre set is the
@@ -110,11 +132,6 @@ _SPARE_INTERIORS = 4
 
 BASE_COLOR = "#b7bcc4"
 
-# Lead-DBS' electrode models, shipped with the viewer so a reconstruction can be
-# opened without a MATLAB install to read them out of.
-ELECTRODE_MODEL_DIR = Path(__file__).resolve().parent / "resources" / "electrodes"
-
-
 def ink_for(background):
     """Text colour that reads against a given background."""
     from matplotlib.colors import to_rgb
@@ -124,6 +141,85 @@ def ink_for(background):
     except ValueError:
         return "#33373d"
     return "#33373d" if (0.299 * r + 0.587 * g + 0.114 * b) > 0.5 else "#e6e9ef"
+
+
+def fiber_set_dir(source):
+    """The folder of the fibre set ``source`` names in the Fiber set list, or
+    None -- for a fibre file, or a set whose folder is not there."""
+    from .paths import entries
+
+    spec = entries("fibers").get(str(source or ""))
+    path = Path(spec["tracts"]) if spec and "tracts" in spec else None
+    return path if path is not None and path.is_dir() else None
+
+
+def tract_side(name):
+    """'L', 'R' or '' from a tract's name, when one whole word of it says so
+    ("CPH_L_all30_MNI", "Tremor-R", "lh.AF"); a midline tract says neither."""
+    words = re.split(r"[_\-. ]+", str(name).lower())
+    if any(w in ("l", "lh", "left") for w in words):
+        return "L"
+    if any(w in ("r", "rh", "right") for w in words):
+        return "R"
+    return ""
+
+
+def tract_names(source):
+    """A fibre set's tracts, for its list: ``[{"name", "side", "section", "hint"}]``
+    in the set's order (see ``fiber_set.set_tracts``); ``[]`` for anything else."""
+    from calvin_utils.neuroimaging_utils.tract_utils.fiber_set import set_tracts
+
+    folder = fiber_set_dir(source)
+    if folder is None:
+        return []
+    return [{"name": t["name"], "side": tract_side(t["name"]), "section": t["section"], "hint": t["hint"]} for t in set_tracts(folder)]
+
+
+def tract_colours(folder):
+    """One RGB per tract of the set, by its position in the set: the tract's
+    ``color`` in regions.json, else the next colour of tab10. By position, so a
+    tract keeps its colour whichever others are hidden."""
+    from calvin_utils.neuroimaging_utils.tract_utils.fiber_set import set_tracts
+    from matplotlib import colormaps
+    from matplotlib.colors import to_rgb
+
+    cycle = colormaps["tab10"].colors
+    return np.asarray([to_rgb(t["color"]) if t["color"] else cycle[i % len(cycle)] for i, t in enumerate(set_tracts(folder))], float).reshape(-1, 3)
+
+
+def load_fiber_set(folder, hidden=(), sign="both", min_abs_value=None, max_abs_value=None, top_percent=None, max_lines=None, step=2, smooth=3):
+    """A fibre set's shown tracts as one line mesh.
+
+    Each tract is its descriptor's atlas fibres that pass the value filters
+    (``fiber_set.tract_fibres``) with their own values; ``max_lines`` caps each
+    tract. Tracts sharing an atlas read it once. Per point, ``tract`` is the
+    tract's position in the set, so a colour stays with its tract whatever is
+    hidden, and ``fiber`` numbers fibres across the whole set in tract order,
+    hidden tracts included, so one value per set fibre can be overlaid;
+    ``atlas_fibers`` is that total.
+    """
+    from calvin_utils.neuroimaging_utils.tract_utils.fiber_set import set_tracts, tract_fibres
+    from calvin_utils.plotting_utils.fiber_render import fibres_to_lines
+
+    hidden = set(hidden)
+    parts, offset = [], 0
+    for i, tract in enumerate(set_tracts(folder)):
+        if tract["name"] not in hidden:
+            try:
+                fibres, values, ids, total = tract_fibres(tract["values"], sign=sign, min_abs_value=min_abs_value, top_percent=top_percent)
+                poly = fibres_to_lines(fibres, values, ids=ids, total=total, max_abs_value=max_abs_value, max_lines=max_lines, step=step, smooth=smooth)
+            except ValueError:
+                poly = None                   # nothing in it survives the thresholds
+            if poly is not None and poly.n_points:
+                poly["tract"] = np.full(poly.n_points, i, np.int32)
+                poly["fiber"] = np.asarray(poly["fiber"]) + offset
+                parts.append(poly)
+        offset += tract["count"]
+    if not parts:
+        raise ValueError("no tract of this fibre set is shown")
+    merged = parts[0].append_polydata(*parts[1:]) if len(parts) > 1 else parts[0]
+    merged.field_data["atlas_fibers"] = np.array([offset], dtype=np.int64)
+    return merged
 
 
 def side_of(name, mesh, tolerance=4.0):
@@ -398,54 +494,45 @@ def _key(layer, fields):
     ).hexdigest()
 
 
-def catalogue():
-    """What the UI offers in its dropdowns, straight from the mesh registry."""
-    from calvin_utils.plotting_utils.brains import MESHES
+def _surface_available(spec):
+    """Whether every piece of a surface mesh can be found: yabplot's cortical
+    surfaces always can (yabplot fetches them), a shipped mesh file only when it
+    is on disk -- the Lead-DBS surfaces, for one, are not part of a packaged viewer."""
+    from calvin_utils.plotting_utils.glass_mesh import _resolve_piece
 
-    # Some registered region sets are packaged inside yabplot rather than shipped
-    # as meshes on disk. yabplot can draw them; this renderer cannot, because it
-    # needs actual geometry. They stay in the list, marked unavailable, so the
-    # reason is visible in the UI instead of arriving as a load error later.
-    meshes = []
-    for name, spec in MESHES.items():
-        # The registry's own family is what decides the group -- a yabplot
-        # subcortical set is a region set even though it ships no directory, and
-        # classifying it by whether it has one would file it under surfaces and
-        # let it be picked as a cortex.
-        region_set = spec.get("family") == "subcortex"
-        available = (not region_set) or region_dir(spec) is not None
-        meshes.append({
-            "name": name,
-            "what": spec.get("what", ""),
-            "group": "parcels" if region_set else "surface",
-            "available": bool(available),
-        })
-    # Atlases converted here (backdrop_jobs.start_atlas): region sets too.
-    for directory in prepared_atlases():
-        try:
-            about = json.loads((directory / "atlas.json").read_text())
-        except (OSError, ValueError):
-            about = {}
-        meshes.append({
-            "name": directory.name,
-            "what": f"[prepared] {about.get('regions', '?')} region meshes, from {Path(str(about.get('source', '?'))).name}" + (f"; {len(about['skipped'])} too small to mesh" if about.get("skipped") else ""),
-            "group": "parcels",
-            "available": True,
-        })
-    return {"meshes": meshes,
+    try:
+        for piece in spec.get("pieces", []):
+            _resolve_piece(str(piece))
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def catalogue():
+    """What the UI offers in its dropdowns. ``sections`` is the Mesh dropdown: both
+    mesh indexes merged (paths.index), each entry marked available or not -- a
+    yabplot set not yet downloaded, or a mesh whose files are not on this
+    machine, stays in the list, greyed, so the reason is visible rather than
+    arriving as a load error when picked. ``fiber_sections`` is the Fiber set
+    dropdown, from both fibre indexes the same way."""
+    from .paths import index
+
+    sections = []
+    for section in index("meshes"):
+        listed = []
+        for spec in section["entries"]:
+            region_set = spec.get("family") == "subcortex"
+            # A yabplot set not downloaded yet can still be picked: drawing it downloads it.
+            available = (region_dir(spec) is not None or bool(spec.get("yabplot_atlas"))) if region_set else _surface_available(spec)
+            listed.append({"name": spec["name"], "label": spec.get("label", spec["name"]), "hint": spec.get("hint", ""), "family": spec.get("family"), "available": bool(available), "shipped": spec["shipped"]})
+        sections.append({"label": section["label"], "entries": listed})
+    fiber_sections = [{"label": section["label"], "entries": [{"name": spec["name"], "label": spec.get("label", spec["name"]), "hint": spec.get("hint", ""), "available": Path(spec.get("tracts", "")).is_dir(), "shipped": spec["shipped"]} for spec in section["entries"]]} for section in index("fibers")]
+    return {"sections": sections,
+            "fiber_sections": fiber_sections,
             "stats": ["max", "mean_nonzero", "mean", "min", "sum"],
             "signs": ["both", "positive", "negative"],
             "modes": ["region", "vertex"],
-            "colorings": ["solid", "direction", "value"]}
-
-
-def prepared_atlases():
-    """The folders in the prepared-atlas library, by name."""
-    from .paths import ATLAS_DIR
-
-    if not ATLAS_DIR.is_dir():
-        return []
-    return sorted(p for p in ATLAS_DIR.iterdir() if p.is_dir() and not p.name.startswith("."))
+            "colorings": ["solid", "direction", "value", "tract"]}
 
 
 # A prepared backdrop counts as a volume everywhere a volume is accepted, so
@@ -467,8 +554,9 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
     """
     import pyvista as pv
 
-    from calvin_utils.plotting_utils.brains import MESHES
     from calvin_utils.plotting_utils.mesh_paint import load_parcels
+
+    from .paths import entries
 
     # Several volumes dropped together are ONE group, not several layers: a set
     # of ROI files is the same thing as a directory of parcel meshes, and the
@@ -504,26 +592,22 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
         )
         return meshes
 
-    spec = MESHES.get(text)
+    # A mesh index entry (paths.index): a set of region meshes, or a surface
+    # made of its pieces -- yabplot surfaces and mesh files, named by path.
+    spec = entries("meshes").get(text)
     if spec is not None and spec.get("family") == "subcortex":
-        directory = region_dir(spec)
+        directory = region_dir(spec, fetch=True)
         if directory is None:
             raise FileNotFoundError(
-                f"{text!r} has no region meshes on this machine. Locally built "
-                "sets live in neuro_plotter_resources; yabplot's own sets are "
-                "downloaded into its cache the first time yabplot draws them."
+                f"{text!r} has no region meshes on this machine: its folder is "
+                "missing, or it is one of yabplot's sets and could not be "
+                "downloaded (it needs the internet the first time)."
             )
         return load_parcels(directory)
-    if spec is None:
-        from .paths import ATLAS_DIR
-
-        if (ATLAS_DIR / text).is_dir():
-            return load_parcels(ATLAS_DIR / text)
     if spec is not None:
-        from calvin_utils.plotting_utils.brains import mesh_pieces
         from calvin_utils.plotting_utils.glass_mesh import build_bmesh
 
-        return build_bmesh(mesh_pieces(text))
+        return build_bmesh(spec["pieces"])
 
     path = Path(text).expanduser()
     if path.is_dir():
@@ -1645,12 +1729,14 @@ class RenderSession:
         dropped on + Slices or opened as a temporary backdrop -- is read once
         and held in memory, 8-bit, by ``_nifti_backdrop``: nothing is written.
         """
-        from calvin_utils.plotting_utils.backdrops import BACKDROP_DIR, Backdrop
+        from calvin_utils.plotting_utils.backdrops import Backdrop
+
+        from .paths import prepared_backdrops
 
         text = str(reference)
         path = Path(text).expanduser()
         if not path.suffix:
-            path = Path(BACKDROP_DIR).expanduser() / f"{text}.npz"
+            path = prepared_backdrops().get(text, path)
         key = str(path)
         if key not in self._backdrops:
             if text.lower().endswith((".nii", ".nii.gz")):
@@ -1737,7 +1823,7 @@ class RenderSession:
         key = _key(layer, ("source", "model", "poses", "mirror"))
         group = self._electrodes.get(key)
         if group is None:
-            group = electrode_meshes(layer["source"], ELECTRODE_MODEL_DIR, model=layer.get("model"), poses=layer.get("poses"), mirror=layer.get("mirror"))
+            group = electrode_meshes(layer["source"], ELECTRODE_DIR, model=layer.get("model"), poses=layer.get("poses"), mirror=layer.get("mirror"))
             self._electrodes[key] = group
             # Every slider step of a trajectory is a new key: keep a few recent.
             while len(self._electrodes) > 4:
@@ -1783,17 +1869,12 @@ class RenderSession:
         if entry is not None:
             self._fibers.move_to_end(key)
         if entry is None:
-            poly = load_fibers(
-                layer["source"],
-                fiber_atlas_path=layer.get("fiber_atlas_path"),
-                sign=layer.get("sign", "both"),
-                min_abs_value=layer.get("min_abs_value"),
-                max_abs_value=layer.get("max_abs_value"),
-                top_percent=layer.get("top_percent"),
-                max_lines=layer.get("max_lines"),
-                step=int(layer.get("step") or 1),
-                smooth=int(layer.get("smooth") or 0),
-            )
+            filters = dict(sign=layer.get("sign", "both"), min_abs_value=layer.get("min_abs_value"), max_abs_value=layer.get("max_abs_value"), top_percent=layer.get("top_percent"), max_lines=layer.get("max_lines"), step=int(layer.get("step") or 1), smooth=int(layer.get("smooth") or 0))
+            folder = fiber_set_dir(layer["source"])
+            if folder is not None:
+                poly = load_fiber_set(folder, hidden=layer.get("hidden_regions") or (), **filters)
+            else:
+                poly = load_fibers(layer["source"], fiber_atlas_path=layer.get("fiber_atlas_path"), **filters)
             entry = {"lines": poly, "tubes": None, "tube_shape": None}
             self._fibers[key] = entry
 
@@ -1875,6 +1956,10 @@ class RenderSession:
                       render_lines_as_tubes=True)
         if layer["coloring"] == "direction":
             return [pl.add_mesh(poly, scalars="dir", rgb=True, **kw)]
+        if layer["coloring"] == "tract" and "tract" in poly.point_data:
+            poly = poly.copy(deep=False)
+            poly["tract_rgb"] = self._fiber_base(layer, poly)
+            return [pl.add_mesh(poly, scalars="tract_rgb", rgb=True, **kw)]
         if layer["coloring"] == "value" and self._has_values(poly):
             cmap, clim = resolve_scale(np.asarray(poly["vals"]),
                                        cmap=layer["palette"], clim=layer["clim"],
@@ -2097,6 +2182,9 @@ class RenderSession:
         coloring = layer.get("coloring", "solid")
         if coloring == "direction" and "dir" in poly.point_data:
             return np.asarray(poly["dir"], float) / 255.0
+        folder = fiber_set_dir(layer.get("source")) if coloring == "tract" else None
+        if folder is not None and "tract" in poly.point_data:
+            return tract_colours(folder)[np.asarray(poly["tract"])]
         if coloring == "value" and RenderSession._has_values(poly):
             values = np.asarray(poly["vals"], float)
             cmap, clim = resolve_scale(values, cmap=layer["palette"],

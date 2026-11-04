@@ -99,13 +99,26 @@ function field(parent, label, node){
   const g = el('div','grow'); g.appendChild(node); row.appendChild(g);
   parent.appendChild(row); return node;
 }
+/* An option with a ``section`` goes under that heading (an optgroup), in the
+ * order the sections first appear -- which is how a resource index's
+ * "section" keys become its dropdown's headings. */
 function select(options, value, onchange){
-  const s = el('select');
+  const s = el('select'), headings = {};
   options.forEach(o => { const opt = el('option', null, o.label ?? o);
-    opt.value = o.value ?? o; if (o.disabled) opt.disabled = true; s.appendChild(opt); });
+    opt.value = o.value ?? o; if (o.disabled) opt.disabled = true; if (o.hint) opt.title = o.hint;
+    if (o.section){
+      if (!headings[o.section]){ headings[o.section] = el('optgroup'); headings[o.section].label = o.section; s.appendChild(headings[o.section]); }
+      headings[o.section].appendChild(opt);
+    } else s.appendChild(opt); });
   s.value = value ?? '';
   s.onchange = () => onchange(s.value);
   return s;
+}
+/* The picked option's hint -- an index entry's "hint" -- as a line under its
+ * dropdown. Nothing when it has none. */
+function pickedHint(parent, options, value){
+  const o = options.find(o => String(o.value ?? o) === String(value ?? ''));
+  if (o && o.hint) parent.appendChild(el('div', 'hint', o.hint));
 }
 function number(value, onchange, {step = 'any', placeholder = 'none'} = {}){
   const i = el('input'); i.type = 'number'; i.step = step;
@@ -238,10 +251,18 @@ async function regionsFor(L){
   return REGION_CACHE[key];
 }
 
+/* The tracts of a fibre set, listed and toggled exactly as an atlas's regions. */
+async function tractsFor(L){
+  const key = JSON.stringify(['tracts', L.source]);
+  if (!REGION_CACHE[key])
+    REGION_CACHE[key] = getJSON('/api/tracts?' + new URLSearchParams({source: L.source || ''})).then(r => r.regions).catch(() => []);
+  return REGION_CACHE[key];
+}
+
 /* A group of 165 parcels is a list you search, not a list you scroll. */
-function regionList(b, L, set){
+function regionList(b, L, set, load = regionsFor, title = 'Regions'){
   const wrap = el('details','fold regions');
-  const head = el('summary', null, 'Regions');
+  const head = el('summary', null, title);
   wrap.appendChild(head);
   const body = el('div'); wrap.appendChild(body); b.appendChild(wrap);
 
@@ -249,7 +270,7 @@ function regionList(b, L, set){
     if (!wrap.open || body.dataset.filled) return;
     body.dataset.filled = '1';
     body.appendChild(el('div','hint','reading group…'));
-    const regions = await regionsFor(L);
+    const regions = await load(L);
     body.innerHTML = '';
     if (!regions.length){ body.appendChild(el('div','hint','no regions')); return; }
 
@@ -265,16 +286,18 @@ function regionList(b, L, set){
                            delete body.dataset.filled; wrap.open = false; wrap.open = true; };
     tools.append(search, all, none); body.appendChild(tools);
 
-    /* Coarse groups, so "everything except the cerebellum" is one click rather
-     * than thirty-two. A box is checked when every region under it is on, and
-     * indeterminate when only some are -- which is the honest state, and is
-     * what tells you a group has been partly hidden by hand. */
-    const groups = [...new Set(regions.map(r => r.group).filter(Boolean))];
+    /* Sections, so "everything except the cerebellum" is one click rather
+     * than thirty-two. They come from the atlas's regions.json (or, without
+     * one, the AAL3 / SUIT name rules). A box is checked when every region
+     * under it is on, and indeterminate when only some are -- which is the
+     * honest state, and is what tells you a section has been partly hidden by
+     * hand. */
+    const sections = [...new Set(regions.map(r => r.section).filter(Boolean))];
     const supra = [];
-    if (groups.length > 1){
+    if (sections.length > 1){
       const row = el('div','supra');
-      groups.forEach(g => {
-        const members = regions.filter(r => r.group === g).map(r => r.name);
+      sections.forEach(g => {
+        const members = regions.filter(r => r.section === g).map(r => r.name);
         const tag = el('label','supra-item');
         const c = el('input'); c.type = 'checkbox';
         c.onchange = () => {
@@ -307,7 +330,14 @@ function regionList(b, L, set){
         box.indeterminate = on > 0 && on < members.length;
       });
     };
+    /* The list runs in the server's order (the regions.json order when there
+     * is one), with a heading wherever the section changes. */
+    let heading = null;
     regions.forEach(r => {
+      if (sections.length > 1 && (r.section || '') !== heading){
+        heading = r.section || '';
+        list.appendChild(el('div','region-sec', heading || 'other'));
+      }
       const row = el('label','region');
       const c = el('input'); c.type='checkbox'; c.checked = !hidden.has(r.name);
       boxes[r.name] = c;
@@ -318,7 +348,8 @@ function regionList(b, L, set){
         syncBoxes();
       };
       row.append(c, el('span', null, r.name));
-      row.dataset.name = r.name.toLowerCase();
+      if (r.hint){ const h = el('span','rhint', r.hint); h.title = r.hint; row.appendChild(h); }
+      row.dataset.name = (r.name + ' ' + (r.hint || '')).toLowerCase();
       list.appendChild(row);
     });
     body.appendChild(list);
@@ -326,7 +357,7 @@ function regionList(b, L, set){
     search.oninput = () => {
       const q = search.value.toLowerCase();
       [...list.children].forEach(row =>
-        row.style.display = row.dataset.name.includes(q) ? '' : 'none');
+        row.style.display = !row.dataset.name || row.dataset.name.includes(q) ? '' : 'none');
     };
   });
 }
@@ -587,14 +618,10 @@ function overlayStack(b, L, set, kind){
 }
 
 function meshBody(b, L, set){
-  const groups = {};
-  CAT.meshes.forEach(m => (groups[m.group] ||= []).push({
-    value: m.name, disabled: m.available === false,
-    label: (m.available === false ? '— ' : '') + m.name + ' — ' +
-           (m.available === false ? 'not available to this renderer'
-                                  : m.what.replace(/^\[[^\]]*\]\s*/, '')),
-  }));
-  const opts = [...(groups.surface || []), ...(groups.parcels || [])];
+  /* The Mesh dropdown is the mesh indexes (paths.py): their sections, their
+   * labels. An entry whose files are not on this machine is listed, greyed. */
+  const opts = CAT.sections.flatMap(s => s.entries.map(m => ({value: m.name, section: s.label, disabled: !m.available, hint: m.hint,
+    label: m.available ? m.label : m.label + ' — not available here'})));
   const vol = isVolume(L.mesh);
 
   /* One list: the built-in meshes and every prepared atlas. Anything else the
@@ -603,14 +630,24 @@ function meshBody(b, L, set){
   const known = opts.some(o => o.value === L.mesh);
   const current = L.mesh && !known ? [{value: L.mesh, label: (vol ? 'NIfTI — ' : '') + String(L.mesh).replace(/\/+$/, '').split('/').pop()}] : [];
   field(b, 'Mesh', select([...current, ...opts], L.mesh, v => set('mesh', v)));
+  pickedHint(b, opts, L.mesh);
+  /* OPEN surfaces a NIfTI straight from the file for this figure, exactly as
+   * dropping it on the layer does; CONVERT ATLAS meshes one once into the
+   * library, kept in the Mesh list for every figure. */
+  const open = el('button', null, 'Open NIfTI …');
+  open.title = 'surface a NIfTI straight from the file, for this figure only (you can also drop one on the layer)';
+  open.onclick = () => chooseFile('volume', $('#m-path').value, p => {
+    L.name = String(p).split('/').pop().split('.nii')[0]; L.tessellate = 0; L.split = 'auto';
+    set('mesh', p); status('surfacing ' + L.name + ' — this takes a moment …'); });
   const convert = el('button', null, 'Convert atlas …');
   convert.title = 'mesh an atlas once into a prepared region set, kept in the Mesh list for every figure';
   convert.onclick = () => convertAtlas(set);
-  field(b, '', convert);
+  const routes = el('div', 'inline'); routes.append(open, convert);
+  field(b, '', routes);
   b.appendChild(el('div', 'hint',
-    'Convert atlas takes a 4D NIfTI (one region per volume), a 3D label NIfTI ' +
-    '(one region per value), or a folder of NIfTIs (one region per file), and an ' +
-    'optional .txt / .lut naming the regions.'));
+    'Open NIfTI surfaces a volume for this figure only. Convert atlas takes a 4D NIfTI ' +
+    '(one region per volume), a 3D label NIfTI (one region per value), or a folder of ' +
+    'NIfTIs (one region per file), and an optional .txt / .lut naming the regions.'));
 
   if (vol){
     /* Prepared backdrops first: they are already resampled and quantised, so
@@ -619,10 +656,9 @@ function meshBody(b, L, set){
     const lib = (BACKDROPS && BACKDROPS.backdrops) || [];
     if (lib.length){
       const chosen = lib.find(d => d.path === L.mesh);
-      field(b, 'Prepared volume', select(
-        [{value:'', label: chosen ? '— other —' : '— choose —'},
-         ...lib.map(d => ({value: d.path,
-           label: `${d.name} · ${d.mm} mm · ${(d.bytes/1e6).toFixed(0)} MB`}))],
+      const prepared = [{value:'', label: chosen ? '— other —' : '— choose —'},
+         ...lib.map(d => ({value: d.path, section: d.section, label: d.label, hint: d.hint}))];
+      field(b, 'Prepared volume', select(prepared,
         chosen ? chosen.path : '',
         v => { if (!v) return;
                L.mesh = v;
@@ -631,6 +667,7 @@ function meshBody(b, L, set){
                const stack = L.overlays || (L.overlays = []);
                if (stack.length && stack[0].mode === 'vertex') stack[0].nifti = v;
                set('mesh', v); drawLayers(); }));
+      pickedHint(b, prepared, chosen ? chosen.path : '');
     }
     pathField(b, 'Volume', L.mesh, 'volume', v => set('mesh', v || ''));
     field(b, 'Threshold', number(L.iso, v => set('iso', v === null ? 0 : v)));
@@ -757,14 +794,14 @@ function sliceBody(b, L, set){
     chosen = SLICE_INFO.get(L.backdrop) || null;
   }
   const options = [{value:'', label: lib.length ? '— choose —' : '— none prepared yet —'},
-    ...lib.map(d => ({value: d.path,
-       label: `${d.name} · ${d.mm} mm · ${(d.bytes/1e6).toFixed(0)} MB`}))];
+    ...lib.map(d => ({value: d.path, section: d.section, label: d.label, hint: d.hint}))];
   for (const [path, name] of TEMP_BODIES)
     if (/\.nii(\.gz)?$/i.test(path)) options.push({value: path, label: 'temporary · ' + name});
   const current = lib.find(d => d.path === L.backdrop || d.name === L.backdrop);
   const pickBox = select(options, current ? current.path : (L.backdrop || ''),
                          v => set('backdrop', v || null));
   field(b, 'Backdrop', pickBox);
+  pickedHint(b, options, current ? current.path : L.backdrop);
   const row = pickBox.closest('.row');
   row.title = 'drop a NIfTI here to slice through it, temporarily';
   dropTarget(row, async files => {
@@ -880,7 +917,7 @@ function volumeBody(b, L, set){
    * set by path in an older figure still shows, under its file name. */
   const lib = VOLUMES || [];
   const entry = lib.find(v => v.name === L.source);
-  const options = lib.map(v => ({value: v.name, label: v.label || v.name}));
+  const options = lib.map(v => ({value: v.name, label: v.label || v.name, section: v.section, hint: v.hint}));
   /* Temporary bodies -- NIfTIs dropped or opened this session, drawn straight
    * from the file -- follow the prepared ones, so a second volume layer can
    * pick one too. They are not kept anywhere: reload and they are gone. */
@@ -892,6 +929,7 @@ function volumeBody(b, L, set){
   /* A region and its table belong to one atlas; a new body starts whole. */
   const newBody = path => { L.body_labels = []; L.body_lut = null; set('source', path); };
   const body = field(b, 'Body', select(options, L.source || '', v => newBody(v || null)));
+  pickedHint(b, options, L.source);
   const row = body.closest('.row');
   row.title = 'drop a NIfTI here to use it as the body, temporarily (with its .lut, for an atlas)';
   dropTarget(row, async files => {
@@ -1114,6 +1152,25 @@ function convertAtlas(set){
   }, {folder: true, title: 'Choose a 4D or label NIfTI, or a folder of NIfTIs'});
 }
 
+/* Convert fibers: pick a tract file or a folder of them, then a name for the
+ * Fibers list. The conversion runs as a job (backdrop_jobs.start_fibers) and
+ * the layer switches to the new set when it is ready. */
+function convertFibers(L, set){
+  chooseFile('fibers', $('#m-path').value, source => {
+    const stem = source.replace(/\/+$/, '').split('/').pop().split('.')[0];
+    const name = prompt('Name for the fiber set, as it will appear in the Fibers list:', stem);
+    if (!name) return;
+    const keep = prompt('Keep the strongest % of each tract\'s fibres, by |value| (e.g. 5)?\n\n' +
+      'Leave blank to keep every fibre. Your .fib.json results are then copied whole, with the atlas they ' +
+      'colour copied once into the set. A number writes each tract as its own small file instead. ' +
+      'Tracts whose values are all equal (a .tck) are always kept whole.', '');
+    if (keep === null) return;
+    postJSON('/api/fibers/convert', {path: source, name, keep_percent: keep.trim() || null})
+      .then(() => { CONVERT_DONE = n => { L.hidden_regions = []; if (L.coloring === 'solid') L.coloring = 'tract'; L.name = name; set('source', n); }; pollConvert(); })
+      .catch(e => status(e.message, true));
+  }, {folder: true, title: 'Choose a tract file (.tck .trk .trx .mat .npz) or a .fib.json result, or a folder of them'});
+}
+
 async function startConvert(path, onDone){
   const answer = prompt(
     'Resolution in mm.\n\n' +
@@ -1138,10 +1195,11 @@ async function pollConvert(){
       status(`converting ${j.name} … ${(j.progress*100).toFixed(0)}%`);
       setTimeout(pollConvert, 1200); return;
     }
-    if (j.kind === 'atlas'){
+    if (j.kind === 'atlas' || j.kind === 'fibers'){
       CAT = await getJSON('/api/catalogue');
       const small = (j.skipped || []).length;
-      status('ready: ' + j.name + (small ? ` · ${small} region(s) too small to mesh: ${j.skipped.join(', ')}` : ''));
+      const what = j.kind === 'atlas' ? 'region(s) too small to mesh' : 'file(s) without fibres';
+      status('ready: ' + j.name + (small ? ` · ${small} ${what}: ${j.skipped.join(', ')}` : ''));
       const done = CONVERT_DONE; CONVERT_DONE = null;
       if (done) done(j.name);
       drawLayers(); return;
@@ -1157,7 +1215,9 @@ async function pollConvert(){
 
 function electrodeBody(b, L, set){
   pathField(b, 'Reconstruction', L.source, 'fibers', v => set('source', v));
-  field(b, 'Lead model', modelPicker(L, v => set('model', v || null)));
+  const leadHint = el('div', 'hint'); leadHint.style.display = 'none';
+  field(b, 'Lead model', modelPicker(L, v => set('model', v || null), leadHint));
+  b.appendChild(leadHint);
   field(b, 'Insulation', colour(L.insulation_color, v => set('insulation_color', v)));
   field(b, 'Contacts', colour(L.contact_color, v => set('contact_color', v)));
   const op = el('input'); op.type='range'; op.min=0; op.max=1; op.step=0.02;
@@ -1173,26 +1233,27 @@ function electrodeBody(b, L, set){
   if (L.source || L.model) orientationEditor(b, L, set);
 }
 
-/* The models shipped with the viewer, grouped by maker (the first word of
- * the name). Read once; a model saved as a file path rather than a name
- * still shows, by its file name. */
+/* The models in resources/electrodes/index.json, under their sections. Read once; a
+ * model saved as a file path rather than a name still shows, by its file name. */
 let ELECTRODE_MODELS = null;
-function modelPicker(L, onchange){
+function modelPicker(L, onchange, hintNode){
   const s = el('select');
   const fill = models => {
     s.innerHTML = '';
     const none = el('option', null, L.source ? 'as the reconstruction names' : '— choose a lead —');
     none.value = ''; s.appendChild(none);
-    const groups = {};
+    const headings = {};
     models.forEach(m => {
-      const maker = m.label.split(' ')[0];
-      if (!groups[maker]){ groups[maker] = el('optgroup'); groups[maker].label = maker; s.appendChild(groups[maker]); }
-      const o = el('option', null, m.label); o.value = m.value; groups[maker].appendChild(o);
+      if (!headings[m.section]){ headings[m.section] = el('optgroup'); headings[m.section].label = m.section; s.appendChild(headings[m.section]); }
+      const o = el('option', null, m.label); o.value = m.value; if (m.hint) o.title = m.hint; headings[m.section].appendChild(o);
     });
     if (L.model && !models.some(m => m.value === L.model)){
       const o = el('option', null, String(L.model).split('/').pop()); o.value = L.model; s.appendChild(o);
     }
     s.value = L.model || '';
+    const picked = models.find(m => m.value === L.model);
+    hintNode.textContent = (picked && picked.hint) || '';
+    hintNode.style.display = hintNode.textContent ? '' : 'none';
   };
   s.onchange = () => onchange(s.value);
   if (ELECTRODE_MODELS) fill(ELECTRODE_MODELS);
@@ -1381,9 +1442,44 @@ function pruneEditor(b, L, set){
 }
 
 function fiberBody(b, L, set){
-  pathField(b, 'Source', L.source, 'fibers', v => set('source', v));
-  field(b, 'Colour by', select(CAT.colorings, L.coloring, v => set('coloring', v)));
-  if (L.coloring !== 'direction'){
+  /* The Fiber set dropdown is the fibre indexes (paths.py), as the Mesh list is
+   * the mesh indexes. A fibre file opened for this figure shows as itself at
+   * the top; picking a set replaces it. */
+  const opts = (CAT.fiber_sections || []).flatMap(s => s.entries.map(f => ({value: f.name, section: s.label, disabled: !f.available, hint: f.hint,
+    label: f.available ? f.label : f.label + ' — not available here'})));
+  const isSet = opts.some(o => o.value === L.source);
+  const current = L.source && !isSet ? [{value: L.source, label: 'File — ' + String(L.source).split('/').pop()}] : [];
+  const none = L.source ? [] : [{value: '', label: opts.length ? '— choose a fiber set —' : '— no fiber sets yet —'}];
+  field(b, 'Fibers', select([...none, ...current, ...opts], L.source || '', v => {
+    if (!v) return;
+    L.hidden_regions = [];
+    if (opts.some(o => o.value === v) && L.coloring === 'solid') L.coloring = 'tract';
+    if (L.name === 'Fibers' || !L.name) L.name = (opts.find(o => o.value === v) || {}).label || L.name;
+    set('source', v); drawLayers(); }));
+  pickedHint(b, opts, L.source);
+  /* OPEN draws a fibre file straight from disk, for this figure; CONVERT FIBERS
+   * turns a tract file, or a folder of them, into a fibre set kept in the list. */
+  const open = el('button', null, 'Open fibers …');
+  open.title = 'draw a fibre file straight from disk, for this figure only (you can also drop one on the layer)';
+  open.onclick = () => chooseFile('fibers', $('#m-path').value, p => {
+    L.hidden_regions = []; if (L.coloring === 'tract') L.coloring = 'solid';
+    L.name = String(p).split('/').pop().split('.')[0];
+    set('source', p); drawLayers(); });
+  const convert = el('button', null, 'Convert fibers …');
+  convert.title = 'convert tract files once into a fibre set, kept in the Fibers list for every figure';
+  convert.onclick = () => convertFibers(L, set);
+  const routes = el('div', 'inline'); routes.append(open, convert);
+  field(b, '', routes);
+  b.appendChild(el('div', 'hint',
+    'Open fibers draws a .tck, .trk, .trx, .mat, .npz or .fib.json for this figure only. Convert fibers ' +
+    'takes one such file or a folder of them, searched through its subfolders, one tract per file, into ' +
+    'the library. A .fib.json result is copied with its values and its atlas (once per set), or cut down ' +
+    'to its strongest fibres if you give a %.'));
+  if (isSet) regionList(b, L, set, tractsFor, 'Tracts');
+
+  const colorings = CAT.colorings.filter(c => isSet || c !== 'tract');
+  field(b, 'Colour by', select(colorings, L.coloring, v => set('coloring', v)));
+  if (L.coloring !== 'direction' && L.coloring !== 'tract'){
     /* The atlas fibres are the backdrop to a finding. Off, only fibres an
      * overlay actually paints are drawn, which is the difference between a
      * bundle you can read and the whole tractogram. */
@@ -1424,8 +1520,9 @@ function fiberBody(b, L, set){
   field(b, 'Keep strongest %', pct);
   field(b, 'Max lines', number(L.max_lines, v => set('max_lines', v), {step:1000}));
   b.appendChild(el('div','hint',
-    'These act on the Source file\'s OWN values, before any overlay: a .fib.npy ' +
-    'result or a Lead-DBS .mat. Min |value| drops fibres whose |value| is below ' +
+    'These act on the fibres\' OWN values, before any overlay: a .fib.npy ' +
+    'result, a Lead-DBS .mat, or each tract of a fiber set (a tract converted from a .mat keeps its vals; ' +
+    'one from a .tck has 1 on every fibre). Min |value| drops fibres whose |value| is below ' +
     'it; Max |value| drops fibres above it; Keep strongest % keeps only that ' +
     'share of fibres, ranked by |value|. A fibre atlas (.npz, .json, .trk, .tck) ' +
     'has no values of its own, so none of the three changes it -- to show ' +
@@ -1898,19 +1995,102 @@ function dropTarget(node, handler){
     depth = 0; node.classList.remove('over');
     const files = [...(e.dataTransfer?.files || [])];
     if (!files.length) return;
-    try { await handler(files); } catch (err) { status(err.message, true); }
+    const packs = files.filter(f => PACK_RE.test(f.name)), rest = files.filter(f => !PACK_RE.test(f.name));
+    try {
+      if (packs.length) await installPacks(packs);
+      if (rest.length) await handler(rest);
+    } catch (err) { status(err.message, true); }
   });
 }
 
-/* The add-layer boxes fold away. Dragging files over the folded header
- * opens it, so a drop target is never out of reach; open or folded is
- * remembered per browser. */
+/* ---------- library and content packs ----------
+ * The prepared atlases and backdrops: the small defaults the viewer ships with
+ * and this user's own (converted, or installed from packs). A content pack
+ * (.cvpack, see packs.py) carries items from one library to another: drop one
+ * on the view or on any + box to install it, or use Install pack -- the better
+ * route for a big one, since it is read where it lies instead of being copied
+ * through the page. Make pack writes the ticked items to one. */
+const PACK_RE = /\.cvpack$/i;
+const fmtBytes = n => n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(0) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' kB';
+
+/* Start a background job and wait for it, showing its progress. */
+async function runJob(start){
+  await start();
+  for (;;){
+    const j = await getJSON('/api/backdrops/job');
+    if (!j.running){ if (j.error) throw new Error(j.error); return j; }
+    status(`${j.kind === 'pack-make' ? 'writing' : 'installing'} ${j.name} … ${(j.progress * 100).toFixed(0)}%`);
+    await new Promise(r => setTimeout(r, 800));
+  }
+}
+async function afterLibraryChange(){
+  CAT = await getJSON('/api/catalogue');
+  await refreshBackdrops(); await refreshVolumes();
+  drawLayers(); if ($('#librarypanel').open) drawLibrary();
+}
+function reportInstall(name, r){
+  const skipped = (r.skipped || []).map(s => `${s.name} (${s.reason})`);
+  status(`${name}: installed ${r.installed.length ? r.installed.join(', ') : 'nothing'}` + (skipped.length ? ' · skipped ' + skipped.join(', ') : ''), !r.installed.length);
+}
+async function installPackAt(path, name){
+  const j = await runJob(() => postJSON('/api/packs/install', {path}));
+  reportInstall(name, j.result);
+  return j.result;
+}
+async function installPacks(files){
+  for (const u of await upload(files)) await installPackAt(u.path, u.name);
+  await afterLibraryChange();
+}
+async function drawLibrary(){
+  const host = $('#library'); host.innerHTML = '';
+  let lib;
+  try { lib = await getJSON('/api/library'); } catch (e) { host.appendChild(el('div', 'hint', e.message)); return; }
+  const ticked = [];
+  const install = el('button', null, 'Install pack …');
+  install.title = 'install a .cvpack into your library (or drop one on the view)';
+  install.onclick = () => chooseFile('pack', $('#m-path').value, async p => {
+    try { await installPackAt(p, p.split('/').pop()); await afterLibraryChange(); } catch (e) { status(e.message, true); } });
+  const make = el('button', null, 'Make pack from ticked …');
+  make.title = 'write the ticked meshes, backdrops and fiber sets to one .cvpack file, to give to someone';
+  make.onclick = () => {
+    const items = ticked.filter(t => t.box.checked).map(t => t.item);
+    if (!items.length){ status('tick the meshes, backdrops or fiber sets to put in the pack', true); return; }
+    chooseFile('save', $('#m-path').value, async p => {
+      if (!PACK_RE.test(p)) p += '.cvpack';
+      const notes = prompt('Notes for whoever installs it — where the data come from, how to cite it, its licence (optional):', '');
+      if (notes === null) return;
+      try {
+        const j = await runJob(() => postJSON('/api/packs/make', {items, path: p, title: p.split('/').pop().replace(PACK_RE, ''), notes}));
+        status(`pack written: ${j.result.path} · ${j.result.items} item(s) · ${fmtBytes(j.result.bytes)}`);
+      } catch (e) { status(e.message, true); }
+    });
+  };
+  const routes = el('div', 'inline'); routes.append(install, make);
+  host.appendChild(routes);
+  for (const [kind, title, list] of [['meshes', 'Meshes', lib.meshes], ['backdrops', 'Backdrops', lib.backdrops], ['fibers', 'Fiber sets', lib.fibers || []]]){
+    host.appendChild(el('div', 'lib-head', title));
+    if (!list.length) host.appendChild(el('div', 'hint', 'none yet'));
+    list.forEach(it => {
+      const row = el('label', 'region');
+      const box = el('input'); box.type = 'checkbox';
+      row.title = it.section + ' · ' + it.name;
+      row.append(box, el('span', null, it.label), el('span', 'lib-tag', (it.shipped ? 'built in · ' : '') + (it.bytes ? fmtBytes(it.bytes) : 'files missing')));
+      if (!it.bytes) box.disabled = true;
+      host.appendChild(row);
+      ticked.push({box, item: {kind, name: it.name}});
+    });
+  }
+  host.appendChild(el('div', 'hint', 'Your conversions and installed packs are kept in ' + lib.dir + ', each listed in its folder\'s index.json' +
+    '. Drop a .cvpack on the view to install it; Install pack reads a big one in place instead of copying it through the page.'));
+}
+$('#librarypanel').addEventListener('toggle', () => { if ($('#librarypanel').open) drawLibrary(); });
+
+/* The add-layer boxes fold away. They always start open when the viewer
+ * opens, and dragging files over the folded header opens it again, so a drop
+ * target is never out of reach. */
 {
   const panel = $('#addpanel');
-  try { if (localStorage.getItem('cv.addpanel') === 'closed') panel.open = false; } catch {}
-  panel.addEventListener('toggle', () => {
-    try { localStorage.setItem('cv.addpanel', panel.open ? 'open' : 'closed'); } catch {}
-  });
+  panel.open = true;
   panel.querySelector('summary').addEventListener('dragenter', () => { panel.open = true; });
 }
 dropTarget($('#ng-mesh'), dropAsNewGroup);
@@ -1939,7 +2119,7 @@ async function browse(path, kind){
 function chooseFile(kind, start, cb, {folder = false, title = null} = {}){
   chooserResolve = cb; chooserKind = kind;
   $('#m-title').textContent = title || {volume:'Choose a NIfTI', fibers:'Choose a fiber file',
-                               save:'Save as', mesh:'Choose a mesh',
+                               save:'Save as', mesh:'Choose a mesh', pack:'Choose a content pack (.cvpack)',
                                labels:'Choose a .txt or .lut naming the regions'}[kind] || 'Choose a file';
   $('#modal').classList.toggle('pick-many', folder);
   $('#m-name').value = '';

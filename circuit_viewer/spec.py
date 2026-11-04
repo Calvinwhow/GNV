@@ -54,7 +54,7 @@ MODES = ("region", "vertex")
 DRAWS = ("fill", "outline")
 REGION_COLORS = (None, "distinct", "atlas")
 SPLITS = ("auto", "single", "labels", "components", "volumes")
-FIBER_COLORINGS = ("solid", "direction", "value")
+FIBER_COLORINGS = ("solid", "direction", "value", "tract")
 OPACITY_PROFILES = ("linear", "sigmoid", "geom", "foreground")
 
 # Azimuth is measured in the axial plane from anterior, turning towards the LEFT
@@ -131,7 +131,9 @@ FIBER_LAYER = {
     "kind": "fibers",
     "name": "Fibers",
     "visible": True,
+    # A fibre file, or the name of a fibre set in the Fiber set list.
     "source": None,
+    "hidden_regions": [],     # tracts of a fibre set that are not drawn
     "fiber_atlas_path": None,
     "sign": "both",
     "min_abs_value": None,
@@ -510,6 +512,7 @@ def normalize_spec(spec):
 
             layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
         elif kind == "fibers":
+            layer["hidden_regions"] = [str(r) for r in (layer.get("hidden_regions") or [])]
             _check(layer["coloring"] in FIBER_COLORINGS,
                    f"coloring must be one of {FIBER_COLORINGS}")
             _check(layer["sign"] in SIGNS, f"sign must be one of {SIGNS}")

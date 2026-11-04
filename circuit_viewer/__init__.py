@@ -10,5 +10,5 @@ __version__ = "0.1.0"
 import os as _os
 from pathlib import Path as _Path
 
-MESH_RESOURCES = _Path(__file__).resolve().parent / "resources" / "meshes" / "neuro"
+MESH_RESOURCES = _Path(__file__).resolve().parent / "resources" / "meshes"
 _os.environ.setdefault("NEURO_PLOTTER_RESOURCES", str(MESH_RESOURCES))

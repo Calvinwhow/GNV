@@ -1,0 +1,21 @@
+{
+  "about": "Melbourne Subcortex Atlas, scale I (Tian et al. 2020; from yabplot).",
+  "entries": [
+    {"name": "CAU-lh", "section": "Basal ganglia", "hint": "Caudate nucleus"},
+    {"name": "CAU-rh", "section": "Basal ganglia", "hint": "Caudate nucleus"},
+    {"name": "PUT-lh", "section": "Basal ganglia", "hint": "Putamen"},
+    {"name": "PUT-rh", "section": "Basal ganglia", "hint": "Putamen"},
+    {"name": "GP-lh", "section": "Basal ganglia", "hint": "Globus pallidus"},
+    {"name": "GP-rh", "section": "Basal ganglia", "hint": "Globus pallidus"},
+    {"name": "NAc-lh", "section": "Basal ganglia", "hint": "Nucleus accumbens"},
+    {"name": "NAc-rh", "section": "Basal ganglia", "hint": "Nucleus accumbens"},
+    {"name": "aTHA-lh", "section": "Thalamus", "hint": "Anterior thalamus"},
+    {"name": "aTHA-rh", "section": "Thalamus", "hint": "Anterior thalamus"},
+    {"name": "pTHA-lh", "section": "Thalamus", "hint": "Posterior thalamus"},
+    {"name": "pTHA-rh", "section": "Thalamus", "hint": "Posterior thalamus"},
+    {"name": "HIP-lh", "section": "Medial temporal", "hint": "Hippocampus"},
+    {"name": "HIP-rh", "section": "Medial temporal", "hint": "Hippocampus"},
+    {"name": "AMY-lh", "section": "Medial temporal", "hint": "Amygdala"},
+    {"name": "AMY-rh", "section": "Medial temporal", "hint": "Amygdala"}
+  ]
+}

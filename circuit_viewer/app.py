@@ -31,7 +31,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 MESH_SUFFIXES = {".vtk", ".vtp", ".stl", ".ply", ".obj", ".gii"}
 VOLUME_SUFFIXES = {".nii", ".gz", ".npz"}
 LABEL_SUFFIXES = {".txt", ".lut", ".csv", ".tsv", ".json"}     # region-name tables (volume_meshes.read_label_table)
-FIBER_SUFFIXES = {".mat", ".npy", ".tck", ".trk", ".json"}
+FIBER_SUFFIXES = {".mat", ".npy", ".npz", ".tck", ".trk", ".trx", ".json"}
 
 
 def _sha256(path, chunk=1 << 20):
@@ -124,6 +124,12 @@ def _spec_paths(value):
 
 
 def create_app(spec=None, drop_dir=None):
+    from .yabplot_cache import seed
+
+    try:
+        seed()                  # the shipped cortical surfaces, for offline use
+    except Exception as exc:
+        print(f"circuit_viewer: could not seed yabplot's cache: {exc!r}")
     app = Flask(__name__, static_folder=None)
     # Drops are temporary: they live in this run's scratch folder (see
     # scratch.py), are collected once nothing uses them, and go with the run.
@@ -163,10 +169,10 @@ def create_app(spec=None, drop_dir=None):
         """Each lead's trajectory as its file places it: what the orientation
         controls start from, and what Reset returns to."""
         from calvin_utils.plotting_utils.electrode_render import electrode_poses
-        from .session import ELECTRODE_MODEL_DIR
+        from .paths import ELECTRODE_DIR
 
         try:
-            return jsonify(electrode_poses(request.args.get("source") or None, ELECTRODE_MODEL_DIR, model=request.args.get("model") or None))
+            return jsonify(electrode_poses(request.args.get("source") or None, ELECTRODE_DIR, model=request.args.get("model") or None))
         except Exception as exc:
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
 
@@ -174,9 +180,9 @@ def create_app(spec=None, drop_dir=None):
     def api_electrode_models():
         """The lead models shipped with the viewer, for the Lead model picker."""
         from calvin_utils.plotting_utils.electrode_render import available_models
-        from .session import ELECTRODE_MODEL_DIR
+        from .paths import ELECTRODE_DIR
 
-        return jsonify(available_models(ELECTRODE_MODEL_DIR))
+        return jsonify(available_models(ELECTRODE_DIR))
 
     @app.get("/api/layer/<kind>")
     def api_new_layer(kind):
@@ -250,7 +256,7 @@ def create_app(spec=None, drop_dir=None):
             return jsonify({"error": "no file in the request"}), 400
         name = Path(item.filename).name
         allowed = (".nii", ".nii.gz", ".mat", ".npy", ".npz", ".tck", ".trk",
-                   ".trx", ".json", ".lut", ".txt", ".tsv", ".csv")
+                   ".trx", ".json", ".lut", ".txt", ".tsv", ".csv", ".cvpack")
         if not name.lower().endswith(allowed):
             return jsonify(
                 {"error": f"{name} is not a volume, tractogram, lead or "
@@ -264,6 +270,8 @@ def create_app(spec=None, drop_dir=None):
         lower = name.lower()
         if lower.endswith(".fib.npy"):
             kind = "fiber_values"
+        elif lower.endswith(".cvpack"):
+            kind = "pack"           # installed by the page with /api/packs/install
         elif lower.endswith((".mat", ".json")):
             from calvin_utils.plotting_utils.electrode_render import (
                 looks_like_electrode,
@@ -345,6 +353,57 @@ def create_app(spec=None, drop_dir=None):
         body = request.get_json(force=True)
         try:
             return jsonify(start_atlas(body["path"], body.get("name"), table=body.get("table") or None))
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/fibers/convert")
+    def api_build_fiber_set():
+        """Start converting a tract file, or a folder of them, into a fibre set in
+        the library. Returns at once; polled on the same job endpoint."""
+        from .backdrop_jobs import start_fibers
+
+        body = request.get_json(force=True)
+        try:
+            return jsonify(start_fibers(body["path"], body.get("name"), keep_percent=body.get("keep_percent")))
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/tracts")
+    def api_tracts():
+        """The tracts of the fibre set a fibre layer names, so they can be listed and toggled."""
+        from .session import tract_names
+
+        try:
+            return jsonify({"regions": tract_names(request.args.get("source", ""))})
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/library")
+    def api_library():
+        """The prepared atlases and backdrops, shipped and this user's: what a
+        content pack can be made from."""
+        from .packs import library
+
+        return jsonify(library())
+
+    @app.post("/api/packs/install")
+    def api_install_pack():
+        """Install a content pack (a path on this machine) as a job."""
+        from .backdrop_jobs import start_install
+
+        try:
+            return jsonify(start_install(request.get_json(force=True)["path"]))
+        except Exception as exc:
+            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/packs/make")
+    def api_make_pack():
+        """Write chosen library items to a content pack, as a job."""
+        from .backdrop_jobs import start_pack
+
+        body = request.get_json(force=True)
+        try:
+            return jsonify(start_pack(body["items"], body["path"], title=body.get("title") or "", notes=body.get("notes") or ""))
         except Exception as exc:
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
 
@@ -561,7 +620,8 @@ def create_app(spec=None, drop_dir=None):
             return jsonify({"error": f"{root} is not a directory"}), 400
         want = request.args.get("kind", "any")
         suffixes = {"mesh": MESH_SUFFIXES, "volume": VOLUME_SUFFIXES,
-                    "fibers": FIBER_SUFFIXES, "labels": LABEL_SUFFIXES}.get(want)
+                    "fibers": FIBER_SUFFIXES, "labels": LABEL_SUFFIXES,
+                    "pack": {".cvpack"}}.get(want)
 
         entries = []
         try:
@@ -589,6 +649,19 @@ def create_app(spec=None, drop_dir=None):
     return app
 
 
+def require_renderer():
+    """Stop with instructions when circuit_pyper's renderer is missing."""
+    try:
+        import calvin_utils.plotting_utils.brains  # noqa: F401
+    except ImportError as exc:
+        raise SystemExit(
+            "circuit_viewer draws with circuit_pyper's renderer, which is not "
+            f"importable here ({exc}).\n"
+            "Install it, or run this from an environment that has it:\n"
+            "    pip install -e /path/to/calvin_utils_project/circuit_pyper"
+        )
+
+
 def main(argv=None):
     import argparse
 
@@ -600,15 +673,7 @@ def main(argv=None):
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
 
-    try:
-        import calvin_utils.plotting_utils.brains  # noqa: F401
-    except ImportError as exc:
-        raise SystemExit(
-            "circuit_viewer draws with circuit_pyper's renderer, which is not "
-            f"importable here ({exc}).\n"
-            "Install it, or run this from an environment that has it:\n"
-            "    pip install -e /path/to/calvin_utils_project/circuit_pyper"
-        )
+    require_renderer()
 
     spec = load_spec(args.project) if args.project else None
     app = create_app(spec)
