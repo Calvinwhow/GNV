@@ -81,33 +81,11 @@ def _region_folder(mesh):
     return path if path.is_dir() else None
 
 
-def region_dir(spec, fetch=False):
-    """The directory of region meshes for a mesh index entry, or None.
-
-    An entry's ``parcels`` names its folder. One of yabplot's sets
-    (``yabplot_atlas``) lives in yabplot's download cache: found there when it
-    has been downloaded, and -- only with ``fetch`` -- downloaded when it has
-    not, which needs the internet. Listing the meshes never fetches; drawing
-    one does.
-    """
-    if "parcels" in spec:
-        path = Path(spec["parcels"])
-        return path if path.is_dir() else None
-
-    atlas = spec.get("yabplot_atlas")
-    if not atlas:
-        return None
-    try:
-        from yabplot.data import GOODBOY, _find_subcortical_files, _resolve_resource_path
-
-        cached = Path(GOODBOY.path) / f"subcortical-{atlas}"
-        if not fetch and not (cached / ".registry_hash").is_file():
-            return None
-        files = _find_subcortical_files(str(_resolve_resource_path(atlas, "subcortical") if fetch else cached))
-    except Exception:
-        return None
-    # {region name: file}; the files sit together in one folder of the download.
-    return Path(next(iter(files.values()))).parent if files else None
+def region_dir(spec):
+    """The folder of region meshes a mesh index entry's ``parcels`` names, or
+    None when it has none or the folder is not on this machine."""
+    path = Path(spec["parcels"]) if "parcels" in spec else None
+    return path if path is not None and path.is_dir() else None
 
 
 # Fields that change the numbers. Anything not listed here is style, and style
@@ -495,9 +473,8 @@ def _key(layer, fields):
 
 
 def _surface_available(spec):
-    """Whether every piece of a surface mesh can be found: yabplot's cortical
-    surfaces always can (yabplot fetches them), a shipped mesh file only when it
-    is on disk -- the Lead-DBS surfaces, for one, are not part of a packaged viewer."""
+    """Whether every piece of a surface mesh is on disk -- the Lead-DBS
+    surfaces, for one, are not part of a packaged viewer."""
     from calvin_utils.plotting_utils.glass_mesh import _resolve_piece
 
     try:
@@ -511,9 +488,8 @@ def _surface_available(spec):
 def catalogue():
     """What the UI offers in its dropdowns. ``sections`` is the Mesh dropdown: both
     mesh indexes merged (paths.index), each entry marked available or not -- a
-    yabplot set not yet downloaded, or a mesh whose files are not on this
-    machine, stays in the list, greyed, so the reason is visible rather than
-    arriving as a load error when picked. ``fiber_sections`` is the Fiber set
+    mesh whose files are not on this machine stays in the list, greyed, so the
+    reason is visible rather than arriving as a load error when picked. ``fiber_sections`` is the Fiber set
     dropdown, from both fibre indexes the same way."""
     from .paths import index
 
@@ -522,8 +498,7 @@ def catalogue():
         listed = []
         for spec in section["entries"]:
             region_set = spec.get("family") == "subcortex"
-            # A yabplot set not downloaded yet can still be picked: drawing it downloads it.
-            available = (region_dir(spec) is not None or bool(spec.get("yabplot_atlas"))) if region_set else _surface_available(spec)
+            available = region_dir(spec) is not None if region_set else _surface_available(spec)
             listed.append({"name": spec["name"], "label": spec.get("label", spec["name"]), "hint": spec.get("hint", ""), "family": spec.get("family"), "available": bool(available), "shipped": spec["shipped"]})
         sections.append({"label": section["label"], "entries": listed})
     fiber_sections = [{"label": section["label"], "entries": [{"name": spec["name"], "label": spec.get("label", spec["name"]), "hint": spec.get("hint", ""), "available": Path(spec.get("tracts", "")).is_dir(), "shipped": spec["shipped"]} for spec in section["entries"]]} for section in index("fibers")]
@@ -593,16 +568,12 @@ def resolve_meshes(name, iso=None, split="auto", presmooth_vox=None):
         return meshes
 
     # A mesh index entry (paths.index): a set of region meshes, or a surface
-    # made of its pieces -- yabplot surfaces and mesh files, named by path.
+    # made of its pieces -- mesh files and folders of L/R meshes, named by path.
     spec = entries("meshes").get(text)
     if spec is not None and spec.get("family") == "subcortex":
-        directory = region_dir(spec, fetch=True)
+        directory = region_dir(spec)
         if directory is None:
-            raise FileNotFoundError(
-                f"{text!r} has no region meshes on this machine: its folder is "
-                "missing, or it is one of yabplot's sets and could not be "
-                "downloaded (it needs the internet the first time)."
-            )
+            raise FileNotFoundError(f"{text!r} has no region meshes on this machine: its folder is missing")
         return load_parcels(directory)
     if spec is not None:
         from calvin_utils.plotting_utils.glass_mesh import build_bmesh

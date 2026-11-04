@@ -124,12 +124,6 @@ def _spec_paths(value):
 
 
 def create_app(spec=None, drop_dir=None):
-    from .yabplot_cache import seed
-
-    try:
-        seed()                  # the shipped cortical surfaces, for offline use
-    except Exception as exc:
-        print(f"gnv: could not seed yabplot's cache: {exc!r}")
     app = Flask(__name__, static_folder=None)
     # Drops are temporary: they live in this run's scratch folder (see
     # scratch.py), are collected once nothing uses them, and go with the run.

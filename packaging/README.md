@@ -24,8 +24,6 @@ ships the folder whole). That folder holds only what ships, each kind with an
 * `meshes/` -- `brain_surfaces/`, `atlases/` (SUIT, AAL3 + SUIT), `index.json`
 * `backdrops/` -- three small MNI templates, `index.json`
 * `electrodes/` -- the 73 Lead-DBS models, `index.json`
-* `yabplot/` -- the six cortical surfaces yabplot would otherwise download on first
-  use, fetched at build time by `fetch_yabplot_surfaces.py` so the app works offline
 
 Everything else -- the 100 um backdrops, converted atlases, the Lead-DBS surfaces --
 lives in a **library** with the same layout: `gnv/library/` in your
@@ -67,7 +65,6 @@ From the repository root, in a fresh Python 3.11 environment:
 
     python -m pip install -r packaging/requirements.txt
     python -m pip install --no-deps git+https://github.com/Calvinwhow/CircuitPyPer.git@development
-    python packaging/fetch_yabplot_surfaces.py
     python -m PyInstaller --noconfirm --clean packaging/GeneralNeuroimageViewer.spec
 
 The app is in `dist/` (`General Neuroimage Viewer.app` on macOS, `GeneralNeuroimageViewer/` elsewhere).

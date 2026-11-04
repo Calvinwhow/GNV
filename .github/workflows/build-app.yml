@@ -59,9 +59,6 @@ jobs:
           TOKEN: ${{ secrets.CIRCUITPYPER_TOKEN }}
         run: python -m pip install --no-deps "git+https://${TOKEN:+x-access-token:${TOKEN}@}${CIRCUITPYPER_REPO}@${CIRCUITPYPER_REF}"
 
-      - name: Fetch the cortical surfaces to ship
-        run: python packaging/fetch_yabplot_surfaces.py
-
       - name: Build
         run: python -m PyInstaller --noconfirm --clean packaging/GeneralNeuroimageViewer.spec
 

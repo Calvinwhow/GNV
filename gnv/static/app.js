@@ -1654,7 +1654,7 @@ function drawLighting(){
   const host = $('#lighting'); host.innerHTML = '';
   field(host, 'Rig', select(
     [{value:'studio', label:'studio — one key, real shadows'},
-     {value:'kit',    label:'light kit — flat, matches yabplot'}],
+     {value:'kit',    label:'light kit — flat, VTK\'s default'}],
     SPEC.lighting.rig || 'studio',
     v => { SPEC.lighting.rig = v; render(); }));
   LIGHT_CONTROLS.forEach(([k, label, lo, hi, step]) => {

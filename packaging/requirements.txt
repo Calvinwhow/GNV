@@ -12,5 +12,4 @@ h5py
 pillow
 matplotlib
 scikit-image
-yabplot>=0.6
 pooch

@@ -2,10 +2,9 @@
 # (gnv/paths.py).
 gnv/library/
 
-# Build products (packaging/README.md), and the cortical surfaces the build fetches.
+# Build products (packaging/README.md).
 build/
 dist/
-gnv/resources/yabplot/
 
 # Half-written files, while a conversion or install is running.
 *.partial

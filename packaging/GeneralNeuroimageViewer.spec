@@ -1,19 +1,18 @@
 # The packaged viewer: PyInstaller, one folder, windowed; a .app on macOS.
 # Build from the repository root (the renderer and packaging/requirements.txt
-# installed, and packaging/fetch_yabplot_surfaces.py run first):
+# installed first):
 #     python -m PyInstaller --noconfirm --clean packaging/GeneralNeuroimageViewer.spec
 #
 # What ships: the viewer's code and page, and everything in
 # gnv/resources -- which holds only what ships: the meshes,
-# backdrops and electrode models its index.json files list, plus the cortical
-# surfaces yabplot would download. Anything else -- the 100 um backdrops,
+# backdrops and electrode models its index.json files list. Anything else -- the 100 um backdrops,
 # converted atlases, the Lead-DBS surfaces -- is a library (gnv/paths.py),
 # filled by converting or by installing content packs.
 
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH).parent
 PACKAGE = ROOT / "gnv"
@@ -24,8 +23,8 @@ def folder(source, dest):
     """Every file under ``source``, placed under ``dest`` in the bundle."""
     if not source.is_dir():
         raise SystemExit(f"missing {source}: the build ships it")
-    # Hidden files are left out, except yabplot's version stamp on each surface.
-    keep = lambda p: p.is_file() and (not p.name.startswith(".") or p.name == ".registry_hash")
+    # Hidden files are left out.
+    keep = lambda p: p.is_file() and not p.name.startswith(".")
     return [(str(p), str(Path(dest) / p.parent.relative_to(source))) for p in sorted(source.rglob("*")) if keep(p)]
 
 
@@ -34,7 +33,6 @@ datas = (
     + folder(PACKAGE / "lineart" / "static", "gnv/lineart/static")
     + folder(PACKAGE / "volumes", "gnv/volumes")
     + folder(RESOURCES, "gnv/resources")
-    + collect_data_files("yabplot")
 )
 
 a = Analysis(
