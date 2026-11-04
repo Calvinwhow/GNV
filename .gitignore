@@ -17,7 +17,7 @@ dist/
 *egg
 
 # Mac
-*dl_archive
+*DS_Store
 
 # Py Cache
 *pyc

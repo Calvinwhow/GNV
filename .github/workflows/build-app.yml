@@ -1,8 +1,11 @@
 name: Build app
 
 # Builds the viewer for macOS (Apple Silicon and Intel) and Windows on every
-# push to main, and attaches the builds to a GitHub Release when a v* tag is
-# pushed (git tag v0.2.0 && git push --tags). See packaging/README.md.
+# push to main and publishes the builds as a new GitHub Release, tagged
+# v<version in pyproject.toml>-build.<run number> (v0.1.0-build.42), with the
+# download and install instructions in packaging/RELEASE_NOTES.md. Pushing a
+# v* tag yourself (git tag v0.2.0 && git push origin v0.2.0) releases under that
+# tag instead. See packaging/README.md.
 
 on:
   workflow_dispatch:
@@ -97,11 +100,14 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Attach builds to the release
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Publish the release
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
       - name: Download builds
         uses: actions/download-artifact@v7
         with:
@@ -111,4 +117,13 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" builds/* --repo "$GITHUB_REPOSITORY" --title "General Neuroimage Viewer $GITHUB_REF_NAME" --generate-notes
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+            TAG="v${VERSION}-build.${GITHUB_RUN_NUMBER}"
+          fi
+          cp packaging/RELEASE_NOTES.md notes.md
+          printf '\n---\nBuilt from commit %s: %s\n' "${GITHUB_SHA:0:7}" "$(git log -1 --pretty=%s)" >> notes.md
+          gh release create "$TAG" builds/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "General Neuroimage Viewer $TAG" --notes-file notes.md --latest

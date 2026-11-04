@@ -50,6 +50,11 @@ writes one from ticked meshes and backdrops.
 
 ## For people you give it to
 
+Every push to `main` publishes a release at
+https://github.com/Calvinwhow/GNV/releases/latest, and its page shows
+`packaging/RELEASE_NOTES.md`: which file to download and how to open it. Edit that
+file to change what people see. In short:
+
 * **macOS:** the builds are not signed. The first time, macOS refuses to open the app.
   Open System Settings -> Privacy & Security and click *Open Anyway* (or run
   `xattr -dr com.apple.quarantine "/Applications/General Neuroimage Viewer.app"`).
