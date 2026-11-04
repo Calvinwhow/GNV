@@ -207,7 +207,7 @@ def check():
                 print(f"FAIL  {route}: {exc}")
         shipped = {
             "electrode models": len(answers.get("api/electrode/models") or []),
-            "available meshes": sum(1 for m in (answers.get("api/catalogue") or {}).get("meshes", []) if m.get("available")),
+            "available meshes": sum(1 for section in (answers.get("api/catalogue") or {}).get("sections", []) for m in section.get("entries", []) if m.get("available")),
             "built-in backdrops": sum(1 for b in (answers.get("api/library") or {}).get("backdrops", []) if b.get("shipped")),
         }
         for what, count in shipped.items():
