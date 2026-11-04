@@ -16,3 +16,7 @@ dist/
 *egg-info
 
 *egg
+
+*dl_archive
+
+*pyc
