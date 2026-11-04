@@ -11,3 +11,7 @@ gnv/resources/yabplot/
 *.partial
 *.building.raw
 .DS_Store
+
+*.venv
+
+*egg

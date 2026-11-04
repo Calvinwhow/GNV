@@ -1,5 +1,5 @@
 Metadata-Version: 2.4
-Name: circuit-viewer
+Name: gnv
 Version: 0.1.0
 Summary: Layered brain-figure viewer: meshes, volumes and tractograms as editable layers.
 Requires-Python: >=3.9
