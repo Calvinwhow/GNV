@@ -47,8 +47,11 @@ a = Analysis(
     noarchive=False,
 )
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="GeneralNeuroimageViewer", console=False)
+# The app icon: one PNG, which PyInstaller converts (with Pillow) to .ico on Windows and .icns on macOS.
+ICON = str(PACKAGE / "static" / "icon.png")
+
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="GeneralNeuroimageViewer", console=False, icon=ICON)
 coll = COLLECT(exe, a.binaries, a.datas, name="GeneralNeuroimageViewer")
 
 if sys.platform == "darwin":
-    app = BUNDLE(coll, name="General Neuroimage Viewer.app", bundle_identifier="edu.bwh.gnv", info_plist={"NSHighResolutionCapable": True})
+    app = BUNDLE(coll, name="General Neuroimage Viewer.app", icon=ICON, bundle_identifier="edu.bwh.gnv", info_plist={"NSHighResolutionCapable": True})
