@@ -349,6 +349,7 @@ SLICE_LAYER = {
     # illusion -- the data is identical -- but it hides whatever sits
     # behind the slice, which is usually what makes one look cheap.
     "fill_background": False,
+    "smooth": True,            # interpolate between voxels, as MRIcroGL does; off shows each voxel square
     "overlays": [],            # volumes composited onto the slice, in order
 }
 

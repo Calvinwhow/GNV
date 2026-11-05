@@ -123,6 +123,17 @@ def _spec_paths(value):
             yield from _spec_paths(item)
 
 
+def _error(exc):
+    """The error as the UI's status line shows it, with the whole traceback written
+    to stderr -- the terminal, or launcher.log in the packaged app -- so a report
+    from a user can say where it came from, not only what it was."""
+    import sys
+    import traceback
+
+    traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+    return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+
 def create_app(spec=None, drop_dir=None):
     app = Flask(__name__, static_folder=None)
     # Drops are temporary: they live in this run's scratch folder (see
@@ -168,7 +179,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             return jsonify(electrode_poses(request.args.get("source") or None, ELECTRODE_DIR, model=request.args.get("model") or None))
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.get("/api/electrode/models")
     def api_electrode_models():
@@ -211,7 +222,7 @@ def create_app(spec=None, drop_dir=None):
                         "world_axes": [back.world_axis(a)[0] for a in range(3)],
                         "mm": float(back.mm)}
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
         return jsonify(info)
 
     @app.get("/api/volumes/labels")
@@ -233,7 +244,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             return jsonify(start_levels(body["source"]))
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.post("/api/upload")
     def api_upload():
@@ -301,7 +312,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             found = read_descriptor(path)
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
         return jsonify({"atlas": str(found["atlas"]),
                         "values": str(found["values"]),
                         "name": found["name"],
@@ -315,7 +326,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             return jsonify(summarise(request.args["path"]))
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.get("/api/backdrops")
     def api_backdrops():
@@ -336,7 +347,7 @@ def create_app(spec=None, drop_dir=None):
                                  mm=None if mm in (None, "", 0) else float(mm),
                                  name=body.get("name")))
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.post("/api/atlases")
     def api_build_atlas():
@@ -348,7 +359,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             return jsonify(start_atlas(body["path"], body.get("name"), table=body.get("table") or None))
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.post("/api/fibers/convert")
     def api_build_fiber_set():
@@ -360,7 +371,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             return jsonify(start_fibers(body["path"], body.get("name"), keep_percent=body.get("keep_percent")))
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.get("/api/tracts")
     def api_tracts():
@@ -370,7 +381,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             return jsonify({"regions": tract_names(request.args.get("source", ""))})
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.get("/api/library")
     def api_library():
@@ -388,7 +399,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             return jsonify(start_install(request.get_json(force=True)["path"]))
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.post("/api/packs/make")
     def api_make_pack():
@@ -399,7 +410,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             return jsonify(start_pack(body["items"], body["path"], title=body.get("title") or "", notes=body.get("notes") or ""))
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.get("/api/backdrops/job")
     def api_backdrop_job():
@@ -422,7 +433,7 @@ def create_app(spec=None, drop_dir=None):
                 else q["mesh"]
             return jsonify({"regions": region_names(mesh, iso=float(q["iso"]) if q.get("iso") else None, split=q.get("split", "auto"), frame=int(q.get("frame") or 0))})
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     @app.get("/api/palettes")
     def api_palettes():
@@ -457,7 +468,7 @@ def create_app(spec=None, drop_dir=None):
                     line_scale=float(q.get("ls", 1) or 1),
                 )
         except Exception as exc:                     # surfaced in the UI status line
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
         headers = {"Cache-Control": "no-store"}
         # Non-fatal complaints ride back on a header rather than in the body,
         # because the body is the PNG and the render succeeded. The browser puts
@@ -483,7 +494,7 @@ def create_app(spec=None, drop_dir=None):
             folder = fiber_set_dir(request.args["path"])
             return jsonify({"frames": set_frame_count(folder) if folder else frame_count(request.args["path"])})
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
 
     # -- animation -----------------------------------------------------------
     # A camera path (or a series played through) rendered frame by frame into a
@@ -506,7 +517,7 @@ def create_app(spec=None, drop_dir=None):
             line_scale = float(body.get("line_scale", 1) or 1)
             base = normalize_spec(body.get("spec") or session.spec)
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
         anim.update(running=True, done=0, total=len(steps), path=out,
                     error=None)
 
@@ -573,7 +584,7 @@ def create_app(spec=None, drop_dir=None):
                 return jsonify({"error": "nothing was recorded"}), 400
             _write_gif(frames, out, None, durations)
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
         return jsonify({"path": out, "frames": len(frames)})
 
     @app.post("/api/export")
@@ -588,7 +599,7 @@ def create_app(spec=None, drop_dir=None):
                     line_scale=float(body.get("line_scale", 1) or 1),
                 )
         except Exception as exc:
-            return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+            return _error(exc)
         return jsonify({"path": path,
                         "width": int(body.get("width", 4000)),
                         "height": int(body.get("height", 3200))})

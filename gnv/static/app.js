@@ -915,6 +915,12 @@ function sliceBody(b, L, set){
   fill.title = 'paint the dropped-out background in the scene colour';
   fill.onchange = () => set('fill_background', fill.checked);
   field(b, 'Fill with background', fill);
+  /* Interpolated between voxels, as MRIcroGL draws a slice; off shows every
+   * voxel as a hard-edged square, for when the voxels themselves are the point. */
+  const smooth = el('input'); smooth.type='checkbox'; smooth.checked = L.smooth !== false;
+  smooth.title = 'interpolate between voxels (cubic, then the GPU); off shows each voxel as a square';
+  smooth.onchange = () => set('smooth', smooth.checked);
+  field(b, 'Smooth voxels', smooth);
   b.appendChild(el('div','hint',
     'Coordinates are world millimetres — type one in to jump straight to a ' +
     'known plane. Background that stays opaque is a black slab in front of the ' +

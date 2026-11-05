@@ -1,6 +1,7 @@
 {
   "about": "The backdrop dropdowns, one entry per line: name (what a figure saves), section (the heading it is listed under), label (the name the list shows), hint (the line shown under it) and file. See calvin_utils/resource_index.py.",
   "entries": [
+    {"name": "mni152", "section": "Converted", "label": "MNI templates", "hint": "MNI152 MRIcroGL brain", "file": "mni152.npz"}
     {"name": "mni_icbm152_t1_tal_nlin_sym_09c_brain", "section": "MNI templates", "label": "ICBM152 2009c symmetric, brain", "hint": "1 mm, brain only; 149 x 185 x 159 voxels", "file": "mni_icbm152_t1_tal_nlin_sym_09c_brain.npz"},
     {"name": "mni_icbm152_t1_tal_nlin_asym_09c", "section": "MNI templates", "label": "ICBM152 2009c asymmetric", "hint": "1 mm, whole head; 193 x 229 x 193 voxels", "file": "mni_icbm152_t1_tal_nlin_asym_09c.npz"},
     {"name": "MNI152_T1_2mm_brain", "section": "MNI templates", "label": "MNI152 T1 2 mm, brain", "hint": "2 mm, brain only (FSL); 76 x 94 x 79 voxels", "file": "MNI152_T1_2mm_brain.npz"}

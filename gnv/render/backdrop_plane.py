@@ -7,6 +7,15 @@ import numpy as np
 
 from gnv.convert.backdrops import AXES
 
+# A smooth slice is drawn at least this many texels across: a 1-2 mm template
+# is resampled with a cubic spline first (up to MAX_UPSAMPLE x), so it reads as
+# tissue rather than a mosaic of voxels, and the GPU interpolates between the
+# texels from there. A slice already this fine (a 100 um template) is drawn as
+# it is. The data is unchanged: this is how it is drawn, the way MRIcroGL
+# interpolates between voxels.
+SMOOTH_TEXELS = 512
+MAX_UPSAMPLE = 8
+
 
 def _colourise(grey, cmap=None):
     """uint8 slice -> RGB. Anatomy wants grey; a cmap is for overlays."""
@@ -18,7 +27,14 @@ def _colourise(grey, cmap=None):
     return (table[grey] * 255).astype(np.uint8)
 
 
-def backdrop_plane(backdrop, axis, world_mm, cmap=None, transparent_below=None, overlays=None, fill=None):
+def upsample_factor(shape, smooth=True):
+    """How many times finer than its voxels a slice of ``shape`` is drawn."""
+    if not smooth:
+        return 1
+    return int(min(MAX_UPSAMPLE, max(1, np.ceil(SMOOTH_TEXELS / max(shape)))))
+
+
+def backdrop_plane(backdrop, axis, world_mm, cmap=None, transparent_below=None, overlays=None, fill=None, smooth=True):
     """A textured quad for one slice: ``(pv.PolyData, pv.Texture, world_mm)``.
 
     The quad is built from the volume's own corner coordinates rather than
@@ -26,11 +42,21 @@ def backdrop_plane(backdrop, axis, world_mm, cmap=None, transparent_below=None, 
     texture coordinates are attached explicitly -- letting VTK infer them is
     how a slice ends up mirrored, which on a brain is both easy to miss and
     serious.
+
+    ``smooth`` draws it interpolated between voxels (see ``SMOOTH_TEXELS``);
+    off, every voxel is a hard-edged square. Overlays are sampled at the
+    texels drawn, so a finer map keeps its own detail on a coarse slice, and
+    the background drops out along a smooth edge rather than a staircase.
     """
     import pyvista as pv
 
     index = backdrop.index_for(axis, world_mm)
-    image = backdrop.slice(axis, index)
+    image = np.asarray(backdrop.slice(axis, index))
+    factor = upsample_factor(image.shape, smooth)
+    if factor > 1:
+        from scipy import ndimage
+
+        image = np.clip(np.rint(ndimage.zoom(image.astype(np.float32), factor, order=3)), 0, 255).astype(np.uint8)
     others = [a for a in AXES if a != axis]
 
     points = []
@@ -56,7 +82,7 @@ def backdrop_plane(backdrop, axis, world_mm, cmap=None, transparent_below=None, 
             composite, overlay_colours, sample_for_overlay,
         )
 
-        grid = backdrop.plane_grid(axis, index)
+        grid = backdrop.plane_grid(axis, index, image.shape)
         flat = grid.reshape(-1, 3)
         stack = []
         for overlay in overlays:
@@ -88,4 +114,6 @@ def backdrop_plane(backdrop, axis, world_mm, cmap=None, transparent_below=None, 
             rgb = np.where(keep[..., None], rgb, np.asarray(fill, np.uint8))
             alpha = np.full(picture.shape, 255, np.uint8)
         rgb = np.dstack([rgb, alpha])
-    return quad, pv.Texture(np.ascontiguousarray(rgb)), backdrop.world_for(axis, index)
+    texture = pv.Texture(np.ascontiguousarray(rgb))
+    texture.interpolate = texture.mipmap = bool(smooth)
+    return quad, texture, backdrop.world_for(axis, index)

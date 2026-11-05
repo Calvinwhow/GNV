@@ -20,5 +20,6 @@ dist/
 *DS_Store
 
 # Py Cache
-__pycache__/
+gnc/__pycache__
+*__pycache__/
 *.py[cod]

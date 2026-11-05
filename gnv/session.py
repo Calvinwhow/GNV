@@ -1261,7 +1261,7 @@ class RenderSession:
                     continue
                 from gnv.render.backdrop_plane import backdrop_plane
 
-                quad, texture, _landed = backdrop_plane(back, axis, float(wanted), cmap=layer.get("cmap"), transparent_below=layer.get("transparent_below"), fill=self._slice_fill(layer), overlays=self._slice_overlays(layer))
+                quad, texture, _landed = backdrop_plane(back, axis, float(wanted), cmap=layer.get("cmap"), transparent_below=layer.get("transparent_below"), fill=self._slice_fill(layer), overlays=self._slice_overlays(layer), smooth=layer.get("smooth", True))
                 entry[0].points = quad.points
                 entry[1].SetTexture(texture)
                 entry[2] = float(wanted)
@@ -1787,7 +1787,7 @@ class RenderSession:
                 wanted = float(middle[world_axis])
             from gnv.render.backdrop_plane import backdrop_plane
 
-            quad, texture, _at = backdrop_plane(back, axis, float(wanted), cmap=layer.get("cmap"), transparent_below=layer.get("transparent_below"), fill=self._slice_fill(layer), overlays=self._slice_overlays(layer, record=True))
+            quad, texture, _at = backdrop_plane(back, axis, float(wanted), cmap=layer.get("cmap"), transparent_below=layer.get("transparent_below"), fill=self._slice_fill(layer), overlays=self._slice_overlays(layer, record=True), smooth=layer.get("smooth", True))
             # Unlit on purpose: these are photographs of tissue, and shading
             # them would add a highlight that means nothing anatomically.
             actor = pl.add_mesh(quad, texture=texture, lighting=False,
