@@ -621,7 +621,7 @@ function overlayStack(b, L, set, kind){
     ovr.value = o.override ?? 1;
     ovr.title = 'how strongly the colour scale overrides the anatomy at its low end';
     ovr.oninput = () => { o.override = parseFloat(ovr.value); set('overlays', stack); };
-    field(body, 'Override brain', ovr);
+    if (kind !== 'volume') field(body, 'Override brain', ovr);
     if (kind === 'volume') xrayControls(body, o, stack, set);
     if (kind !== 'fibers') outlineControls(body, o, stack, set);
     card.appendChild(body);

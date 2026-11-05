@@ -474,6 +474,12 @@ def normalize_spec(spec):
 
         if kind in ("mesh", "slices", "fibers", "volume"):
             layer["overlays"] = _overlays(raw, layer, _legacy_xray(raw, kind))
+            if kind == "volume":
+                # A body's maps are always painted at full strength: "Override
+                # brain" is not offered there, so an older figure's setting is
+                # not left acting where it cannot be seen or changed.
+                for overlay in layer["overlays"]:
+                    overlay["override"] = 1.0
 
         if kind == "electrode":
             layer["hidden_regions"] = [str(r) for r in

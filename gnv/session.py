@@ -1808,6 +1808,12 @@ class RenderSession:
             actor = pl.add_mesh(quad, texture=texture, lighting=False,
                                 opacity=float(layer["opacity"]),
                                 show_scalar_bar=False)
+            # A smoothed slice's texture has partial alpha where the background
+            # drops out, and VTK then draws the whole actor in its translucent
+            # pass -- which does not sort planes, so three orthogonal slices
+            # showed through one another. A fully opaque slice is drawn in the
+            # opaque pass; the dropped-out background still stays clear.
+            actor.SetForceOpaque(float(layer["opacity"]) >= 1.0)
             actors.append(actor)
             lines = []
             for overlay in traced:
