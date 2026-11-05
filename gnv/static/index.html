@@ -46,7 +46,8 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   padding:12px 14px;border-bottom:1px solid var(--line);
   display:flex;align-items:center;gap:8px;
 }
-#panel header h1{font-size:13px;margin:0;font-weight:600;letter-spacing:.3px;flex:1}
+#panel header h1{font-size:13px;margin:0;font-weight:600;letter-spacing:.3px;flex:1;white-space:nowrap}
+#panel header h1 .by{color:var(--ink-dim);font-size:11px;font-weight:400;letter-spacing:0;margin-left:5px}
 #panel header .v{color:var(--ink-dim);font-size:11px}
 #toolbar{display:flex;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 #toolbar button{flex:1;min-width:64px;font-size:12px}
@@ -135,7 +136,6 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   border-bottom:1px solid var(--line);background:var(--panel);
 }
 #viewbar .spacer{flex:1}
-#viewbar .byline{color:var(--ink-dim);font-size:12px;margin-right:10px;white-space:nowrap}
 #viewbar button{font-size:12px;padding:4px 9px}
 #viewbar button.on{border-color:var(--accent);color:var(--accent)}
 #stage{flex:1;position:relative;overflow:hidden;background:#0f1216;cursor:grab}
@@ -193,7 +193,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 </head>
 <body>
 <div id="panel">
-  <header><h1>General Neuroimage Viewer</h1><span class="v" id="ver"></span></header>
+  <header><h1>General Neuroimage Viewer<span class="by">by Calvin Howard</span></h1><span class="v" id="ver"></span></header>
   <div id="toolbar">
     <button id="b-new">New</button>
     <button id="b-open">Open</button>
@@ -236,7 +236,6 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 
 <div id="view">
   <div id="viewbar">
-    <span class="byline">by Calvin Howard</span>
     <button data-view="left">Left</button>
     <button data-view="right">Right</button>
     <button data-view="anterior">Ant</button>

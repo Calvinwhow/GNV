@@ -159,33 +159,49 @@
   width.oninput = () => set('width', parseFloat(width.value));
   row('Line width', width);
 
+  /* Writes the line art to ``path`` (.svg vectors or .png) at the Scene export
+   * size, the same size and line scaling the viewer's own Export PNG uses. */
+  async function exportTo(path, extension){
+    if (!path) return;
+    if (!/\.(svg|png)$/i.test(path)) path += extension;
+    const stage = q('#stage').getBoundingClientRect();
+    const long = figure().export_px || 4000;
+    const scale = long / Math.max(stage.width, stage.height);
+    say('line art: exporting ' + path + ' …');
+    try {
+      const r = await fetch('/lineart/export', {method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path, width: Math.round(stage.width * scale),
+          height: Math.round(stage.height * scale), line_scale: scale,
+          camera: figure().camera || {}, options: opts})});
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      say('exported ' + j.path);
+    } catch (e) { say(e.message, true); }
+  }
+  // The viewer's own Save-as dialog when there is one; a prompt otherwise.
+  const askPath = (extension, then) => {
+    const start = (q('#m-path') || {}).value || '';
+    if (typeof chooseFile === 'function') chooseFile('save', start, then);
+    else then(prompt('Save line art as (' + extension + '):', start));
+  };
+
   const exportButton = make('button', null, 'Export SVG…');
   exportButton.style.cssText = 'margin-top:8px;width:100%';
   body.appendChild(exportButton);
-  exportButton.onclick = () => {
-    const go = async path => {
-      if (!path) return;
-      if (!/\.(svg|png)$/i.test(path)) path += '.svg';
-      const stage = q('#stage').getBoundingClientRect();
-      const long = figure().export_px || 4000;
-      const scale = long / Math.max(stage.width, stage.height);
-      say('line art: exporting ' + path + ' …');
-      try {
-        const r = await fetch('/lineart/export', {method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({path, width: Math.round(stage.width * scale),
-            height: Math.round(stage.height * scale), line_scale: scale,
-            camera: figure().camera || {}, options: opts})});
-        const j = await r.json();
-        if (!r.ok) throw new Error(j.error || r.statusText);
-        say('exported ' + j.path);
-      } catch (e) { say(e.message, true); }
-    };
-    // The viewer's own Save-as dialog when there is one; a prompt otherwise.
-    const start = (q('#m-path') || {}).value || '';
-    if (typeof chooseFile === 'function') chooseFile('save', start, go);
-    else go(prompt('Save line art as (.svg or .png):', start));
-  };
+  exportButton.onclick = () => askPath('.svg', path => exportTo(path, '.svg'));
+
+  /* Export PNG writes what the view shows. While line art is on, the view shows
+   * the line art -- it covers the shaded frame entirely -- so the viewer's
+   * Export PNG button writes the line art instead of the shaded render. Caught
+   * on the document before the button's own handler runs, so the viewer's
+   * script still needs to know nothing about this add-on. */
+  document.addEventListener('click', e => {
+    if (!on || !e.target.closest('#b-export')) return;
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    askPath('.png', path => exportTo(path, '.png'));
+  }, true);
 
   body.appendChild(make('div', 'hint',
     'Turn on Line art in the view bar to draw the view this way: meshes become ' +
@@ -193,7 +209,8 @@
     'drawn as lines, and anything behind a surface is hidden. Slices show contour ' +
     'lines of the anatomy (Slice isolines sets how many), the tissue outline, and ' +
     'map regions hatched in their colours. Volume bodies are not drawn. The paper ' +
-    'is the Scene background. Export SVG writes ' +
-    'vectors at the Scene export size — they print at any size and open in ' +
-    'Illustrator. These settings are kept in this browser, not in the figure file.'));
+    'is the Scene background. While line art is on, Export PNG writes the line ' +
+    'art, as shown. Export SVG writes vectors at the Scene export size — they print ' +
+    'at any size and open in Illustrator. These settings are kept in this browser, ' +
+    'not in the figure file.'));
 })();
