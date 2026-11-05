@@ -241,10 +241,10 @@ function sectionEditor(b, L, set){
 const REGION_CACHE = {};
 
 async function regionsFor(L){
-  const key = JSON.stringify([L.mesh, L.iso, L.split]);
+  const key = JSON.stringify([L.mesh, L.iso, L.split, L.frame || 0]);
   if (!REGION_CACHE[key]){
     const q = new URLSearchParams({mesh: Array.isArray(L.mesh) ? JSON.stringify(L.mesh) : L.mesh,
-                                   split: L.split || 'auto'});
+                                   split: L.split || 'auto', frame: L.frame || 0});
     if (L.iso != null) q.set('iso', L.iso);
     REGION_CACHE[key] = getJSON('/api/regions?' + q).then(r => r.regions).catch(() => []);
   }
@@ -402,7 +402,7 @@ function pair(a, z, phA, phZ, onchange){
  * scenes play slower rather than skipping frames. The colour scale is read
  * from the whole series, so a value keeps its colour from frame to frame. */
 const FRAMES = {};                 // path -> promise of a frame count
-const PLAYING = new Set();         // overlay ids being played
+const PLAYING = new Set();         // 'overlay:<id>' / 'layer:<id>' being played
 function frameCount(path){
   if (!path) return Promise.resolve(1);
   if (!(path in FRAMES)){
@@ -411,36 +411,63 @@ function frameCount(path){
   }
   return FRAMES[path];
 }
-function frameControls(body, o, stack, set){
-  frameCount(o.nifti).then(n => {
+/* One frame row for anything that holds a series: an overlay's map, or a
+ * layer's own 4D source (a NIfTI mesh, a NIfTI body, a fibre set with fibres x
+ * time values). ``holder`` keeps the frame and its fps; ``apply`` tells the
+ * scene the slider moved. Each row plays on its own -- Animate's "step 4D
+ * series along the path" is what runs them all together. The row goes in
+ * ``slot``, placed where it belongs before the frame count comes back. */
+function frameRow(slot, count, holder, key, apply){
+  Promise.resolve(count).then(n => {
     if (n <= 1) return;
     const row = el('div','row'); row.appendChild(el('label', null, 'Frame'));
     const box = el('div','grow inline');
-    const play = el('button', null, PLAYING.has(o.id) ? '❚❚' : '▶');
+    const play = el('button', null, PLAYING.has(key) ? '❚❚' : '▶');
     play.title = 'play the series';
     const slider = el('input'); slider.type = 'range'; slider.min = 0; slider.max = n - 1;
-    slider.step = 1; slider.value = o.frame || 0;
-    const shown = el('span','hint', `${(o.frame || 0) + 1} / ${n}`);
+    slider.step = 1; slider.value = (holder.frame || 0) % n;
+    const shown = el('span','hint', `${(holder.frame || 0) % n + 1} / ${n}`);
+    shown.style.whiteSpace = 'nowrap';
     const fps = el('input'); fps.type = 'number'; fps.min = 1; fps.max = 30; fps.step = 1;
-    fps.value = o._fps || 4; fps.title = 'frames per second'; fps.style.width = '3.5em';
-    fps.onchange = () => { o._fps = parseFloat(fps.value) || 4; };
-    const show = k => { o.frame = k; slider.value = k; shown.textContent = `${k + 1} / ${n}`; };
-    slider.oninput = () => { show(parseInt(slider.value)); set('overlays', stack); };
+    fps.value = holder._fps || 4; fps.title = 'frames per second'; fps.style.width = '3.5em';
+    fps.onchange = () => { holder._fps = parseFloat(fps.value) || 4; };
+    const show = k => { holder.frame = k; slider.value = k; shown.textContent = `${k + 1} / ${n}`; };
+    slider.oninput = () => { show(parseInt(slider.value)); apply(); };
     play.onclick = async () => {
-      if (PLAYING.has(o.id)){ PLAYING.delete(o.id); play.textContent = '▶'; return; }
-      PLAYING.add(o.id); play.textContent = '❚❚';
-      while (PLAYING.has(o.id)){
+      if (PLAYING.has(key)){ PLAYING.delete(key); play.textContent = '▶'; return; }
+      PLAYING.add(key); play.textContent = '❚❚';
+      while (PLAYING.has(key)){
         const t0 = performance.now();
-        show(((o.frame || 0) + 1) % n);
+        show(((holder.frame || 0) + 1) % n);
         await renderSettled();
-        const wait = 1000 / (o._fps || 4) - (performance.now() - t0);
+        const wait = 1000 / (holder._fps || 4) - (performance.now() - t0);
         if (wait > 0) await sleep(wait);
       }
     };
     box.append(play, slider, shown, fps);
     row.appendChild(box);
-    body.insertBefore(row, body.children[1] || null);
+    slot.appendChild(row);
   });
+}
+function frameSlot(parent){
+  const slot = el('div'); parent.appendChild(slot); return slot;
+}
+function isFiberSet(source){
+  return !!source && (CAT.fiber_sections || []).some(s => s.entries.some(f => f.name === source));
+}
+/* How many frames a layer's OWN source holds -- mirrors session.layer_frame_count:
+ * a 4D NIfTI mesh is a time series unless its split is "volumes" (one region per
+ * volume, all at once); a body is its NIfTI's frames; a fibre set is the most
+ * frames any of its tracts' values hold. */
+function layerFrameCount(L){
+  if (L.kind === 'mesh')
+    return typeof L.mesh === 'string' && isVolume(L.mesh) && L.split !== 'volumes' ? frameCount(L.mesh) : Promise.resolve(1);
+  if (L.kind === 'volume') return frameCount(L.source);
+  if (L.kind === 'fibers') return isFiberSet(L.source) ? frameCount(L.source) : Promise.resolve(1);
+  return Promise.resolve(1);
+}
+function layerFrames(b, L, set){
+  frameRow(frameSlot(b), layerFrameCount(L), L, 'layer:' + L.id, () => set('frame', L.frame));
 }
 
 function overlayStack(b, L, set, kind){
@@ -467,7 +494,7 @@ function overlayStack(b, L, set, kind){
     pathField(body, kind === 'fibers' ? 'Values' : 'NIfTI', o.nifti,
               kind === 'fibers' ? 'fibers' : 'volume',
               v => { o.nifti = v; o.frame = 0; set('overlays', stack); drawLayers(); });
-    frameControls(body, o, stack, set);
+    frameRow(frameSlot(body), frameCount(o.nifti), o, 'overlay:' + o.id, () => set('overlays', stack));
     /* Two stages, kept apart on purpose.
      *
      * PROCESSING acts on the volume: it decides which values are in the figure
@@ -645,7 +672,7 @@ function meshBody(b, L, set){
   const routes = el('div', 'inline'); routes.append(open, convert);
   field(b, '', routes);
   b.appendChild(el('div', 'hint',
-    'Open NIfTI surfaces a volume for this figure only. Convert atlas takes a 4D NIfTI ' +
+    'Open NIfTI surfaces a volume for this figure only; a 4D one plays as a time series. Convert atlas takes a 4D NIfTI ' +
     '(one region per volume), a 3D label NIfTI (one region per value), or a folder of ' +
     'NIfTIs (one region per file), and an optional .txt / .lut naming the regions.'));
 
@@ -675,8 +702,10 @@ function meshBody(b, L, set){
       [{value:'auto',label:'auto'},
        {value:'single',label:'single — one surface'},
        {value:'labels',label:'labels — one per integer value'},
-       {value:'components',label:'components — one per blob'}],
-      L.split, v => set('split', v)));
+       {value:'components',label:'components — one per blob'},
+       {value:'volumes',label:'volumes — one region per 4D volume'}],
+      L.split, v => { set('split', v); drawLayers(); }));
+    layerFrames(b, L, set);
     const sm = el('input'); sm.type='range'; sm.min=0; sm.max=3; sm.step=0.1;
     sm.value = L.presmooth_vox; sm.title = 'surface smoothing, in voxels';
     sm.onchange = () => set('presmooth_vox', parseFloat(sm.value));
@@ -930,6 +959,7 @@ function volumeBody(b, L, set){
   const newBody = path => { L.body_labels = []; L.body_lut = null; set('source', path); };
   const body = field(b, 'Body', select(options, L.source || '', v => newBody(v || null)));
   pickedHint(b, options, L.source);
+  layerFrames(b, L, set);
   const row = body.closest('.row');
   row.title = 'drop a NIfTI here to use it as the body, temporarily (with its .lut, for an atlas)';
   dropTarget(row, async files => {
@@ -1461,8 +1491,13 @@ function fiberBody(b, L, set){
    * turns a tract file, or a folder of them, into a fibre set kept in the list. */
   const open = el('button', null, 'Open fibers …');
   open.title = 'draw a fibre file straight from disk, for this figure only (you can also drop one on the layer)';
-  open.onclick = () => chooseFile('fibers', $('#m-path').value, p => {
+  open.onclick = () => chooseFile('fibers', $('#m-path').value, async p => {
     L.hidden_regions = []; if (L.coloring === 'tract') L.coloring = 'solid';
+    /* A result opens as its atlas with its values painted on, as a drop does. */
+    if (DESC_RE.test(p)){
+      try { Object.assign(L, await fromDescriptor(p)); } catch (e) { status(e.message, true); return; }
+      set('source', L.source); drawLayers(); return;
+    }
     L.name = String(p).split('/').pop().split('.')[0];
     set('source', p); drawLayers(); });
   const convert = el('button', null, 'Convert fibers …');
@@ -1475,6 +1510,7 @@ function fiberBody(b, L, set){
     'takes one such file or a folder of them, searched through its subfolders, one tract per file, into ' +
     'the library. A .fib.json result is copied with its values and its atlas (once per set), or cut down ' +
     'to its strongest fibres if you give a %.'));
+  layerFrames(b, L, set);
   if (isSet) regionList(b, L, set, tractsFor, 'Tracts');
 
   const colorings = CAT.colorings.filter(c => isSet || c !== 'tract');
@@ -1713,6 +1749,7 @@ function drawLayers(){
        * field. Only fields that change WHICH controls exist trigger a rebuild. */
       const set = (k, v) => {
         L[k] = v;
+        if (k === 'mesh' || k === 'source') L.frame = 0;   // a new source starts at its first frame
         if (RESTRUCTURE.has(k)) drawLayers();
         render();
       };
@@ -1731,7 +1768,8 @@ async function volumeHint(parent, path){
     const v = await getJSON('/api/volume?' + new URLSearchParams({path}));
     note.textContent = `${v.shape.join('×')} · range ${v.min.toFixed(2)}…` +
       `${v.max.toFixed(2)} · ${v.distinct.toLocaleString()} distinct value(s)` +
-      ` · auto → ${v.suggested_split}`;
+      (v.frames > 1 ? ` · ${v.frames} frames: a time series, one frame at a time (Split "volumes" shows each volume as a region instead)`
+                    : ` · auto → ${v.suggested_split}`);
   } catch (e) { note.textContent = e.message; }
 }
 
@@ -1749,7 +1787,19 @@ const TRACT_RE  = /\.(mat|tck|trk|trx|json|npz)$/i;
 const VALUES_RE = /\.fib\.values\.npy$|\.values\.npy$|\.fib\.npy$/i;
 /* The descriptor stands in for the values it describes, so dropping one on a
  * layer that already has fibres adds a finding rather than replacing them. */
-const DESC_RE   = /\.fib\.desc\.json$/i;
+const DESC_RE   = /\.fib(\.desc)?\.json$/i;     // .fib.json, and the older .fib.desc.json
+
+/* A result descriptor is a whole fibre layer in one file: it names the atlas
+ * its values were written against, so it brings the fibres AND the first
+ * finding on them. Its values may be one per fibre or fibres x time; a series
+ * plays from the overlay's Frame row. */
+async function fromDescriptor(path){
+  const d = await getJSON('/api/descriptor?path=' + encodeURIComponent(path));
+  const o = await newOverlay(path);
+  o.mode = 'vertex'; o.name = d.name; o.hide_below_min = true;
+  status(`${d.name}: ${d.fiber_count} fibers from ${d.atlas.split('/').pop()} …`);
+  return {name: d.name, source: d.atlas, overlays: [o]};
+}
 
 async function upload(files){
   const out = [];
@@ -1813,7 +1863,7 @@ async function dropAsNewSlices(files){
 
 /* + Fibers takes three things.
  *   a tractogram (.tck / .trk / Lead-DBS .mat / .npz) -- drawn as the layer;
- *   a result descriptor (.fib.desc.json) -- it names the atlas its values were
+ *   a result descriptor (.fib.json) -- it names the atlas its values were
  *     written against, so it brings the fibres AND the colouring;
  *   value files (.fib.values.npy, or any .npy of one value per fibre, or
  *     fibres x frames) -- each colours the layer as one more finding.
@@ -1834,11 +1884,7 @@ async function dropAsNewFibers(files){
   let layer;
   if (descs.length){
     const [u] = await upload(descs.slice(0, 1));
-    const d = await getJSON('/api/descriptor?path=' + encodeURIComponent(u.path));
-    const o = await newOverlay(u.path);
-    o.mode = 'vertex'; o.name = d.name; o.hide_below_min = true;
-    layer = await addLayer('fibers', {name: d.name, source: d.atlas, overlays: [o]});
-    status(`${d.name}: ${d.fiber_count} fibers from ${d.atlas.split('/').pop()} …`);
+    layer = await addLayer('fibers', await fromDescriptor(u.path));
   } else {
     const [u] = await upload(tracts.slice(0, 1));
     if (u.kind === 'electrode')
@@ -1902,13 +1948,9 @@ async function dropAsNewGroup(files){
          * values were written against, so dropping one gives the fibres AND
          * the first finding on them. More .fib.values.npy can then be dropped
          * onto the layer. */
-        const d = await getJSON('/api/descriptor?path=' + encodeURIComponent(u.path));
         const layer = await getJSON('/api/layer/fibers');
-        const o = await newOverlay(u.path);
-        o.mode = 'vertex'; o.name = d.name; o.hide_below_min = true;
-        Object.assign(layer, {name: d.name, source: d.atlas, overlays: [o]});
+        Object.assign(layer, await fromDescriptor(u.path));
         SPEC.layers.push(layer); OPEN = layer.id;
-        status(`${d.name}: ${d.fiber_count} fibers from ${d.atlas.split('/').pop()} …`);
         continue;
       }
       const electrode = u.kind === 'electrode';
@@ -2306,6 +2348,11 @@ async function pathSteps(preset, n, series){
           (st.frames[L.id] = st.frames[L.id] || {})[index] = Math.floor(i / steps.length * count);
         });
       }
+      /* ...and so does a layer whose own source is a series. */
+      const own = await layerFrameCount(L);
+      if (own > 1) steps.forEach((st, i) => {
+        (st.layer_frames = st.layer_frames || {})[L.id] = Math.floor(i / steps.length * own);
+      });
     }
   }
   return steps;
@@ -2316,6 +2363,20 @@ function applyStep(st){
   for (const [id, entries] of Object.entries(st.frames || {})){
     const L = SPEC.layers.find(l => l.id === id);
     if (L) for (const [index, frame] of Object.entries(entries)) L.overlays[index].frame = frame;
+  }
+  for (const [id, frame] of Object.entries(st.layer_frames || {})){
+    const L = SPEC.layers.find(l => l.id === id);
+    if (L) L.frame = frame;
+  }
+}
+/* The frames every layer and overlay show, to put back after a preview. */
+function framesNow(){
+  return SPEC.layers.map(L => [L, L.frame, (L.overlays || []).map(o => o.frame)]);
+}
+function restoreFrames(held){
+  for (const [L, frame, overlays] of held){
+    if (frame !== undefined) L.frame = frame;
+    overlays.forEach((f, i) => { if (L.overlays && L.overlays[i]) L.overlays[i].frame = f; });
   }
 }
 function animPanel(){
@@ -2385,7 +2446,7 @@ function animPanel(){
     if (btn.textContent === 'Stop'){ PATH_STOP = true; return; }
     const {fps, n, preset, series} = settings();
     if (preset === 'keys' && KEYS.length < 2){ status('set at least two keyframes', true); return; }
-    const before = cameraNow(), steps = await pathSteps(preset, n, series);
+    const before = cameraNow(), held = framesNow(), steps = await pathSteps(preset, n, series);
     PATH_STOP = false; btn.textContent = 'Stop';
     for (const st of steps){
       if (PATH_STOP) break;
@@ -2395,7 +2456,7 @@ function animPanel(){
       if (wait > 0) await sleep(wait);
     }
     btn.textContent = 'Preview';
-    applyStep(before); render();
+    applyStep(before); restoreFrames(held); render();
   };
   $('#a-gif').onclick = () => {
     const {fps, n, preset, series} = settings();

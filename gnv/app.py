@@ -420,9 +420,7 @@ def create_app(spec=None, drop_dir=None):
         try:
             mesh = json.loads(q["mesh"]) if q.get("mesh", "").startswith("[") \
                 else q["mesh"]
-            return jsonify({"regions": region_names(
-                mesh, iso=float(q["iso"]) if q.get("iso") else None,
-                split=q.get("split", "auto"))})
+            return jsonify({"regions": region_names(mesh, iso=float(q["iso"]) if q.get("iso") else None, split=q.get("split", "auto"), frame=int(q.get("frame") or 0))})
         except Exception as exc:
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
 
@@ -475,11 +473,15 @@ def create_app(spec=None, drop_dir=None):
 
     @app.get("/api/frames")
     def api_frames():
-        """How many frames a map holds (4D NIfTI, or fibres x time values)."""
+        """How many frames a map holds: a 4D NIfTI, fibres x time values, or a
+        fibre set (the most any of its tracts holds)."""
+        from .convert.fiber_set import set_frame_count
         from .frames import frame_count
+        from .session import fiber_set_dir
 
         try:
-            return jsonify({"frames": frame_count(request.args["path"])})
+            folder = fiber_set_dir(request.args["path"])
+            return jsonify({"frames": set_frame_count(folder) if folder else frame_count(request.args["path"])})
         except Exception as exc:
             return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
 
@@ -529,6 +531,10 @@ def create_app(spec=None, drop_dir=None):
                                         continue
                                     for index, frame in entries.items():
                                         layer["overlays"][int(index)]["frame"] = int(frame)
+                            for layer_id, frame in (step.get("layer_frames") or {}).items():
+                                for layer in spec["layers"]:
+                                    if layer["id"] == layer_id:
+                                        layer["frame"] = int(frame)
                             session.set_spec(spec)
                             camera = {k: float(step[k]) for k in
                                       ("azimuth", "elevation", "zoom") if k in step}

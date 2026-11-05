@@ -46,7 +46,42 @@ from .spec import camera_direction, normalize_spec
 __all__ = ["RenderSession", "catalogue", "region_names", "tract_names", "side_of", "ink_for"]
 
 
-def region_names(mesh, iso=None, split="auto", presmooth_vox=None):
+def mesh_source(mesh, split="auto", frame=0):
+    """What a mesh layer loads: ``(mesh, split)``. A 4D NIfTI is a time series:
+    the layer shows frame ``frame``, surfaced as a 3D map -- unless its split
+    is "volumes", which keeps every volume as a region of its own, all shown at
+    once. Each frame is written once to the scratch cache (``frames``) and its
+    meshes are kept, so a series is slow the first time through and quick after."""
+    from gnv import frames
+
+    if isinstance(mesh, str) and is_volume(mesh) and split != "volumes" and frames.frame_count(mesh) > 1:
+        return frames.frame_path(mesh, frame), split
+    return mesh, split
+
+
+def layer_frame_count(layer):
+    """How many frames a layer's OWN source holds -- a 4D NIfTI mesh (not split
+    into one region per volume), a 4D NIfTI body, a fibre set with fibres x
+    time tract values -- and 1 for anything else. Overlays count their frames
+    separately (``frames.resolve``)."""
+    from gnv import frames, volume_render as vr
+
+    kind = layer.get("kind")
+    if kind == "mesh":
+        mesh = layer.get("mesh")
+        return frames.frame_count(mesh) if isinstance(mesh, str) and is_volume(mesh) and layer.get("split") != "volumes" else 1
+    if kind == "volume" and layer.get("source"):
+        source = vr.resolve_source(layer["source"])
+        return frames.frame_count(source) if is_volume(source) else 1
+    if kind == "fibers":
+        from gnv.convert.fiber_set import set_frame_count
+
+        folder = fiber_set_dir(layer.get("source"))
+        return set_frame_count(folder) if folder else 1
+    return 1
+
+
+def region_names(mesh, iso=None, split="auto", presmooth_vox=None, frame=0):
     """The regions a group contains, each with its side, its section and its hint.
 
     An atlas folder's ``regions.json`` (``read_regions``) gives each region the
@@ -59,7 +94,8 @@ def region_names(mesh, iso=None, split="auto", presmooth_vox=None):
     from gnv.render.brains import supra_region
     from gnv.resource_index import read_regions
 
-    group = resolve_meshes(mesh, iso=iso, split=split, presmooth_vox=presmooth_vox)
+    source, split = mesh_source(mesh, split, frame)
+    group = resolve_meshes(source, iso=iso, split=split, presmooth_vox=presmooth_vox)
     folder = _region_folder(mesh)
     table = read_regions(folder) if folder else {}
     rows = [{"name": name, "side": side_of(name, part), "section": table.get(name, {}).get("section") if table else supra_region(name), "hint": table.get(name, {}).get("hint", "")} for name, part in group.items()]
@@ -93,12 +129,12 @@ def region_dir(spec):
 # Geometry is now only geometry: what the meshes ARE. Everything about how they
 # are coloured lives in the overlay stack and is resolved at draw time, so
 # adding a second finding never rebuilds the surfaces.
-_GEOMETRY_KEYS = ("mesh", "tessellate", "iso", "split", "presmooth_vox",
+_GEOMETRY_KEYS = ("mesh", "frame", "tessellate", "iso", "split", "presmooth_vox",
                   "show_left", "show_right", "hidden_regions", "section",
                   "section_cap")
-_LOAD_KEYS = ("mesh", "iso", "split", "presmooth_vox")
+_LOAD_KEYS = ("mesh", "frame", "iso", "split", "presmooth_vox")
 _FIBER_KEYS = ("source", "fiber_atlas_path", "sign", "min_abs_value",
-               "max_abs_value", "top_percent", "max_lines", "step", "smooth", "hidden_regions")
+               "max_abs_value", "top_percent", "max_lines", "step", "smooth", "hidden_regions", "frame")
 # How many cached builds no open layer uses are kept anyway (most recent first):
 # enough to step a slider back without rebuilding, few enough that a long
 # session does not hold every value it passed through. A loaded fibre set is the
@@ -165,11 +201,12 @@ def tract_colours(folder):
     return np.asarray([to_rgb(t["color"]) if t["color"] else cycle[i % len(cycle)] for i, t in enumerate(set_tracts(folder))], float).reshape(-1, 3)
 
 
-def load_fiber_set(folder, hidden=(), sign="both", min_abs_value=None, max_abs_value=None, top_percent=None, max_lines=None, step=2, smooth=3):
+def load_fiber_set(folder, hidden=(), frame=0, sign="both", min_abs_value=None, max_abs_value=None, top_percent=None, max_lines=None, step=2, smooth=3):
     """A fibre set's shown tracts as one line mesh.
 
     Each tract is its descriptor's atlas fibres that pass the value filters
-    (``fiber_set.tract_fibres``) with their own values; ``max_lines`` caps each
+    (``fiber_set.tract_fibres``) with their own values -- frame ``frame`` of a
+    tract whose values are fibres x time; ``max_lines`` caps each
     tract. Tracts sharing an atlas read it once. Per point, ``tract`` is the
     tract's position in the set, so a colour stays with its tract whatever is
     hidden, and ``fiber`` numbers fibres across the whole set in tract order,
@@ -184,7 +221,7 @@ def load_fiber_set(folder, hidden=(), sign="both", min_abs_value=None, max_abs_v
     for i, tract in enumerate(set_tracts(folder)):
         if tract["name"] not in hidden:
             try:
-                fibres, values, ids, total = tract_fibres(tract["values"], sign=sign, min_abs_value=min_abs_value, top_percent=top_percent)
+                fibres, values, ids, total = tract_fibres(tract["values"], frame=frame, sign=sign, min_abs_value=min_abs_value, top_percent=top_percent)
                 poly = fibres_to_lines(fibres, values, ids=ids, total=total, max_abs_value=max_abs_value, max_lines=max_lines, step=step, smooth=smooth)
             except ValueError:
                 poly = None                   # nothing in it survives the thresholds
@@ -198,6 +235,17 @@ def load_fiber_set(folder, hidden=(), sign="both", min_abs_value=None, max_abs_v
     merged = parts[0].append_polydata(*parts[1:]) if len(parts) > 1 else parts[0]
     merged.field_data["atlas_fibers"] = np.array([offset], dtype=np.int64)
     return merged
+
+
+def _body_source(layer):
+    """The file a volume layer's body is drawn from: its source, or -- for a 4D
+    NIfTI -- frame ``layer["frame"]`` of it, written once to the scratch cache."""
+    from gnv import frames, volume_render as vr
+
+    source = vr.resolve_source(layer["source"])
+    if is_volume(source) and frames.frame_count(source) > 1:
+        return frames.frame_path(source, layer.get("frame") or 0)
+    return source
 
 
 def side_of(name, mesh, tolerance=4.0):
@@ -765,9 +813,8 @@ class RenderSession:
         if group is not None:
             self._groups.move_to_end(load_key)
         if group is None:
-            group = resolve_meshes(layer["mesh"], iso=layer.get("iso"),
-                                   split=layer.get("split", "auto"),
-                                   presmooth_vox=layer.get("presmooth_vox"))
+            source, split = mesh_source(layer["mesh"], layer.get("split", "auto"), layer.get("frame") or 0)
+            group = resolve_meshes(source, iso=layer.get("iso"), split=split, presmooth_vox=layer.get("presmooth_vox"))
             self._groups[load_key] = group
         # Shallow copies, so painting writes to a mesh this render owns. Handing
         # out the cached originals let a "paint" array from one render survive
@@ -1171,11 +1218,14 @@ class RenderSession:
         # showing one again must not re-mesh a volume.
         live = {"geometry": set(), "groups": set(), "fibers": set()}
         for layer in self.spec["layers"]:
+            # Every frame of a layer's own 4D source counts as in use, so a
+            # series built once replays without rebuilding.
+            frames = [dict(layer, frame=k) for k in range(layer_frame_count(layer))]
             if layer["kind"] == "mesh" and layer.get("mesh"):
-                live["geometry"].add(_key(layer, _GEOMETRY_KEYS))
-                live["groups"].add(_key(layer, _LOAD_KEYS))
+                live["geometry"].update(_key(f, _GEOMETRY_KEYS) for f in frames)
+                live["groups"].update(_key(f, _LOAD_KEYS) for f in frames)
             elif layer["kind"] == "fibers" and layer.get("source"):
-                live["fibers"].add(_key(layer, _FIBER_KEYS))
+                live["fibers"].update(_key(f, _FIBER_KEYS) for f in frames)
         for cache, keep, spare in ((self._geometry, live["geometry"], _SPARE_GEOMETRY),
                                    (self._groups, live["groups"], _SPARE_GROUPS),
                                    (self._fibers, live["fibers"], _SPARE_FIBERS)):
@@ -1292,7 +1342,7 @@ class RenderSession:
         from gnv import volume_render as vr
 
         try:
-            source = vr.resolve_source(layer["source"])
+            source = _body_source(layer)
             grid = self._volume_grid(source, self._volume_level(layer) or 1,
                                      float(layer.get("body_smooth_vox") or 0.0),
                                      layer.get("body_labels") or [])
@@ -1400,8 +1450,7 @@ class RenderSession:
         from gnv import volume_render as vr
 
         try:
-            return vr.level_for(vr.resolve_source(layer["source"]),
-                                self._quality)
+            return vr.level_for(_body_source(layer), self._quality)
         except Exception:
             return None         # unreadable: drawing it says why
 
@@ -1449,8 +1498,10 @@ class RenderSession:
                     and k[2] != stamp]:
             del self._volume_grids[old]     # the file changed under us
         self._volume_grids[key] = vr.load_grid(source, level, smooth_vox, labels)
-        # Both levels of the body in use, and a couple of recent others.
-        while len(self._volume_grids) > 4:
+        # Both levels of the body in use and a couple of recent others -- plus
+        # every frame of a 4D body, so a series built once replays at speed.
+        keep = 4 + sum(layer_frame_count(layer) for layer in self.spec["layers"] if layer.get("kind") == "volume")
+        while len(self._volume_grids) > keep:
             del self._volume_grids[next(iter(self._volume_grids))]
         return self._volume_grids[key]
 
@@ -1838,7 +1889,7 @@ class RenderSession:
             filters = dict(sign=layer.get("sign", "both"), min_abs_value=layer.get("min_abs_value"), max_abs_value=layer.get("max_abs_value"), top_percent=layer.get("top_percent"), max_lines=layer.get("max_lines"), step=int(layer.get("step") or 1), smooth=int(layer.get("smooth") or 0))
             folder = fiber_set_dir(layer["source"])
             if folder is not None:
-                poly = load_fiber_set(folder, hidden=layer.get("hidden_regions") or (), **filters)
+                poly = load_fiber_set(folder, hidden=layer.get("hidden_regions") or (), frame=layer.get("frame") or 0, **filters)
             else:
                 poly = load_fibers(layer["source"], fiber_atlas_path=layer.get("fiber_atlas_path"), **filters)
             entry = {"lines": poly, "tubes": None, "tube_shape": None}

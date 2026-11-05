@@ -17,7 +17,7 @@
 (() => {
   'use strict';
   const STORE = 'gnv.lineart';
-  const DEFAULTS = {axis: 'z', spacing_mm: 1.5, hatch: true, hatch_mm: 0.8,
+  const DEFAULTS = {contours: true, axis: 'z', spacing_mm: 1.5, hatch: true, hatch_mm: 0.8,
                     region_outline: true, silhouette: true, ink: null, width: 1.0,
                     slice_levels: 6};
   const q = sel => document.querySelector(sel);
@@ -129,6 +129,7 @@
   [['z', 'horizontal (axial)'], ['y', 'coronal'], ['x', 'sagittal']].forEach(([v, l]) => {
     const o = make('option', null, l); o.value = v; axis.appendChild(o); });
   axis.value = opts.axis; axis.onchange = () => set('axis', axis.value);
+  row('Contour lines', tick('contours', 'the contour lines across each surface; off leaves the outlines, region edges and hatching'));
   row('Contours', axis);
   row('Spacing (mm)', num('spacing_mm', 0.1));
   row('Hatch maps', tick('hatch', 'cross-hatch where a colouring map paints, in its colours'));

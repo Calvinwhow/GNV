@@ -108,15 +108,39 @@ def descriptor_files(descriptor):
     return values, FiberFormatConverter.atlas_from_values_description(values)
 
 
-def tract_fibres(values_path, sign="both", min_abs_value=None, top_percent=None):
+def frame_values(values, frame=0):
+    """One value per fibre from a tract's values: the values themselves, or
+    column ``frame`` of a fibres x time array (one row per atlas fibre, one
+    column per time point, as ``gnv.frames`` reads a series)."""
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim == 1:
+        return values
+    return values[:, int(frame) % values.shape[1]]
+
+
+def set_frame_count(folder):
+    """How many frames the set ``folder`` holds: the most any tract's values
+    have (a fibres x time array), 1 when every tract has one value per fibre."""
+    counts = [1]
+    for tract in set_tracts(folder):
+        try:
+            shape = np.load(tract["values"], mmap_mode="r", allow_pickle=False).shape
+        except (OSError, ValueError):
+            continue
+        counts.append(shape[1] if len(shape) == 2 else 1)
+    return max(counts)
+
+
+def tract_fibres(values_path, frame=0, sign="both", min_abs_value=None, top_percent=None):
     """``(fibres, values, ids, total)`` for one tract of a set: its atlas's
     fibres that pass the value filters (``FiberFormatConverter._fiber_value_mask``),
-    their values, their numbers in the atlas, and how many fibres the atlas holds."""
+    their values (frame ``frame`` of a fibres x time array), their numbers in
+    the atlas, and how many fibres the atlas holds."""
     from calvin_utils.neuroimaging_utils.tract_utils.fiber_converter import FiberFormatConverter
 
     values_path = Path(values_path)
     atlas = FiberFormatConverter.atlas_from_values_description(values_path)
-    values = np.asarray(np.load(values_path), dtype=np.float32)
+    values = frame_values(np.load(values_path), frame)
     fibres = atlas_fibres(atlas)
     if len(fibres) != len(values):
         raise ValueError(f"{atlas.name} holds {len(fibres)} fibres but {values_path.name} has {len(values)} values")
@@ -129,8 +153,8 @@ def read_tract(path):
     """``(fibres, values)`` from one tract file or descriptor.
 
     ``fibres`` is a list of N x 3 float32 arrays in MNI mm; ``values`` one
-    float32 per fibre -- a descriptor's values, a Lead-DBS result's ``vals``,
-    else all 1. Fibres with fewer than two finite points are dropped together
+    float32 per fibre (or a fibres x time array) -- a descriptor's values, a
+    Lead-DBS result's ``vals``, else all 1. Fibres with fewer than two finite points are dropped together
     with their values.
     """
     from calvin_utils.neuroimaging_utils.tract_utils.fiber_atlas_converter import FiberAtlasConverter
@@ -155,12 +179,15 @@ def read_tract(path):
 
 def strongest(fibres, values, keep_percent):
     """The ``keep_percent`` % of fibres with the largest |value|; all of them
-    when every value is the same (there is nothing to rank)."""
+    when every value is the same (there is nothing to rank). A fibre of a
+    fibres x time array is ranked by its peak |value| over time, and keeps its
+    whole row."""
     from calvin_utils.neuroimaging_utils.tract_utils.fiber_converter import FiberFormatConverter
 
-    if keep_percent is None or not len(values) or np.ptp(values) == 0:
+    peak = np.nanmax(np.abs(values), axis=1) if np.ndim(values) == 2 else values
+    if keep_percent is None or not len(values) or np.ptp(peak) == 0:
         return fibres, values
-    keep = FiberFormatConverter._fiber_value_mask(values, "both", None, keep_percent)
+    keep = FiberFormatConverter._fiber_value_mask(peak, "both", None, keep_percent)
     return [f for f, k in zip(fibres, keep) if k], values[keep]
 
 

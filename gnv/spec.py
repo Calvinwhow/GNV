@@ -88,6 +88,7 @@ MESH_LAYER = {
     "name": "Mesh",
     "visible": True,
     "mesh": "pial_wholebrain",   # a registered name, a directory, or a NIfTI
+    "frame": 0,                  # which frame of a 4D NIfTI is shown (see split)
     "iso": 0.0,                  # NIfTI source: "inside" is value > iso
     "split": "auto",             # auto | single | labels | components | volumes (4D)
     "presmooth_vox": 1.2,        # NIfTI source: surface smoothing, in voxels
@@ -134,6 +135,7 @@ FIBER_LAYER = {
     # A fibre file, or the name of a fibre set in the Fiber set list.
     "source": None,
     "hidden_regions": [],     # tracts of a fibre set that are not drawn
+    "frame": 0,               # which frame of a fibre set's fibres x time values is shown
     "fiber_atlas_path": None,
     "sign": "both",
     "min_abs_value": None,
@@ -297,6 +299,7 @@ VOLUME_LAYER = {
     "name": "Volume",
     "visible": True,
     "source": "spm152",        # a packaged name, or a NIfTI path
+    "frame": 0,                # which frame of a 4D NIfTI is shown
     # -- the body ----------------------------------------------------------
     "cmap": "gray",            # matplotlib name or MRIcroGL .clut
     "color": None,             # a hex tint; overrides cmap when set
@@ -519,6 +522,9 @@ def normalize_spec(spec):
             layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
         else:
             layer["opacity"] = min(max(float(layer["opacity"]), 0.0), 1.0)
+
+        if "frame" in base:
+            layer["frame"] = max(int(layer.get("frame") or 0), 0)
 
         for key in ("threshold", "min_value", "clim", "min_abs_value",
                     "max_abs_value", "top_percent"):

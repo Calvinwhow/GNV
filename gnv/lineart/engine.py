@@ -34,6 +34,7 @@ import numpy as np
 __all__ = ["DEFAULTS", "settings", "draw", "svg"]
 
 DEFAULTS = {
+    "contours": True,        # contour lines across each surface (off: outlines, edges and hatching only)
     "spacing_mm": 1.5,       # contour spacing on unmapped surface
     "axis": "z",             # contour planes are perpendicular to this axis
     "hatch": True,           # cross-hatch what a colouring map paints
@@ -75,7 +76,7 @@ def settings(raw):
             out[key] = max(float(out[key]), 0.05)
         except (TypeError, ValueError):
             out[key] = DEFAULTS[key]
-    for key in ("hatch", "region_outline", "silhouette"):
+    for key in ("contours", "hatch", "region_outline", "silhouette"):
         out[key] = bool(out[key])
     try:
         out["slice_levels"] = int(min(max(int(out["slice_levels"]), 0), 30))
@@ -237,8 +238,11 @@ def surface_strokes(actor, poly, opts, ink, role="mesh", base=None):
     ``role`` "mesh": a single-coloured surface is drawn in the ink (a mesh's
     grey would be a faint line), and where a map paints it -- where its colour
     differs from the layer's own ``base`` colour -- is hatched in the map's
-    colours. Any other role draws in the surface's own colours."""
+    colours. Any other role draws in the surface's own colours. With
+    ``contours`` off a surface draws no contour lines of its own -- only its
+    hatching and region edges, and the outlines drawn for every surface."""
     strokes = Strokes()
+    lines = opts["contours"]
     colours, on_cells = _actor_colours(actor, poly)
     ink_rgb = _rgb01(ink)
     axis, cross = opts["axis"], _CROSS[opts["axis"]]
@@ -247,8 +251,8 @@ def surface_strokes(actor, poly, opts, ink, role="mesh", base=None):
     if on_cells is None:
         # One colour for the whole thing: a plain mesh, an electrode contact.
         colour = ink_rgb if role == "mesh" else colours
-        _add_lines(strokes, _contours(poly, axis, spacing), None, colour,
-                   _WEIGHT["contour"])
+        if lines:
+            _add_lines(strokes, _contours(poly, axis, spacing), None, colour, _WEIGHT["contour"])
         return strokes
 
     if on_cells:
@@ -256,7 +260,7 @@ def surface_strokes(actor, poly, opts, ink, role="mesh", base=None):
         # cut region by region rather than blending colours across borders.
         keys = np.round(colours * 255).astype(np.int32)
         code = keys[:, 0] * 65536 + keys[:, 1] * 256 + keys[:, 2]
-        for value in np.unique(code):
+        for value in (np.unique(code) if lines else ()):
             cells = np.flatnonzero(code == value)
             piece = poly.extract_cells(cells)
             _add_lines(strokes, _contours(piece, axis, spacing), None,
@@ -268,15 +272,15 @@ def surface_strokes(actor, poly, opts, ink, role="mesh", base=None):
     mesh = poly.copy(deep=False)
     mesh.point_data["_rgb"] = (colours * 255).astype(np.uint8)
     if role != "mesh" or base is None:
-        _add_lines(strokes, _contours(mesh, axis, spacing), "_rgb", None,
-                   _WEIGHT["contour"])
+        if lines:
+            _add_lines(strokes, _contours(mesh, axis, spacing), "_rgb", None, _WEIGHT["contour"])
         return strokes
     mapped = np.abs(colours - _rgb01(base)[None, :]).max(1) > 2.5 / 255
     faces = mesh.faces.reshape(-1, 4)[:, 1:] if mesh.n_cells else np.zeros((0, 3), int)
     inside = mapped[faces].all(1)
     rest = np.flatnonzero(~inside)
     painted = np.flatnonzero(inside)
-    if len(rest):
+    if len(rest) and lines:
         _add_lines(strokes, _contours(mesh.extract_cells(rest), axis, spacing),
                    None, ink_rgb, _WEIGHT["contour"])
     if len(painted):
@@ -284,7 +288,7 @@ def surface_strokes(actor, poly, opts, ink, role="mesh", base=None):
         if opts["hatch"]:
             _add_lines(strokes, _contours(part, axis, hatch_mm), "_rgb", None, _WEIGHT["hatch"])
             _add_lines(strokes, _contours(part, cross, hatch_mm), "_rgb", None, _WEIGHT["hatch"])
-        else:
+        elif lines:
             _add_lines(strokes, _contours(part, axis, spacing), "_rgb", None, _WEIGHT["contour"])
         if opts["region_outline"]:
             _add_lines(strokes, _boundary(part), "_rgb", None, _WEIGHT["edge"])

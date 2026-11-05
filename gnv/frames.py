@@ -40,7 +40,7 @@ def _kind(path):
     lower = str(path).lower()
     if lower.endswith((".nii", ".nii.gz")):
         return "nifti"
-    if lower.endswith(".npy") or lower.endswith(".fib.desc.json"):
+    if lower.endswith((".npy", ".fib.json", ".fib.desc.json")):
         return "fibres"
     return None
 
@@ -68,9 +68,8 @@ def frame_count(path):
             shape = nib.load(path).header.get_data_shape()
             count = int(np.prod(shape[3:])) if len(shape) > 3 else 1
         elif kind == "fibres":
-            values = np.load(_fibre_values_path(path), mmap_mode="r",
-                             allow_pickle=False)
-            count = int(min(values.shape)) if values.ndim == 2 else 1
+            values = np.load(_fibre_values_path(path), mmap_mode="r", allow_pickle=False)
+            count = int(values.shape[1]) if values.ndim == 2 else 1
     except Exception:
         count = 1
     _counts[key] = max(count, 1)
@@ -90,16 +89,40 @@ def _load(path):
         data = data.reshape(data.shape[:3] + (-1,))
         entry = (data, np.asarray(image.affine, float))
     else:
-        values = np.asarray(np.load(_fibre_values_path(path), allow_pickle=False),
-                            dtype=np.float32)
-        # Fibres along the long axis, frames along the short one.
-        if values.ndim == 2 and values.shape[0] < values.shape[1]:
-            values = values.T
+        # Fibres x frames: one row per atlas fibre, one column per time point.
+        values = np.asarray(np.load(_fibre_values_path(path), allow_pickle=False), dtype=np.float32)
         entry = (values, None)
     _series[key] = entry
     while len(_series) > 2:
         _series.popitem(last=False)
     return entry
+
+
+_SUFFIXES = (".nii.gz", ".nii", ".fib.values.npy", ".fib.desc.json", ".fib.json", ".fib.npy", ".npy")
+
+
+def _stem(path):
+    """The series' name without its extension: ``bold.nii.gz`` -> ``bold``."""
+    stem = Path(path).name
+    for suffix in _SUFFIXES:
+        if stem.lower().endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
+def _copy_label_table(path, folder):
+    """Put the series' label table (its .txt / .lut sidecar) beside a frame,
+    so a 4D label series names its regions in every frame as it would in 3D."""
+    import shutil
+
+    try:
+        from gnv.convert.volume_meshes import _sidecars
+
+        sides = _sidecars(path)
+        if sides:
+            shutil.copyfile(sides[0], folder / (_stem(path) + sides[0].suffix))
+    except Exception:
+        pass                    # unnamed regions, not a failed frame
 
 
 def frame_path(path, frame):
@@ -111,14 +134,20 @@ def frame_path(path, frame):
 
     tag = hashlib.sha1(f"{path}|{_stamp(path)}".encode()).hexdigest()[:16]
     # Frame copies are a cache in this run's scratch folder: touched when
-    # reused, swept once idle, and gone with the run (see scratch.py).
-    folder = scratch.area("frames")
+    # reused, swept once idle, and gone with the run (see scratch.py). Each
+    # frame keeps the series' own file name, in a folder of its own, so a
+    # surface made from it is named after the series -- the same region name
+    # in every frame, which is what a hidden region is remembered by.
     nifti = _kind(path) == "nifti"
-    out = folder / (f"{tag}_f{frame:04d}" + (".nii" if nifti else ".fib.values.npy"))
+    folder = scratch.area("frames") / f"{tag}_f{frame:04d}"
+    out = folder / (_stem(path) + (".nii" if nifti else ".fib.values.npy"))
     if out.is_file():
         scratch.touch(out)
         return str(out)
     scratch.sweep()
+    folder.mkdir(parents=True, exist_ok=True)
+    if nifti:
+        _copy_label_table(path, folder)
     data, affine = _load(path)
     temp = out.with_name(f".{out.name}.{os.getpid()}.partial")
     if nifti:
@@ -178,11 +207,7 @@ def resolve(overlay, spec_key):
     out["_spec_key"] = spec_key
     # The colour bar is captioned by name; without one it would read the
     # cache file's. Name it after the series, with the frame on show.
-    stem = Path(path).name
-    for suffix in (".nii.gz", ".nii", ".fib.values.npy", ".fib.desc.json", ".npy"):
-        if stem.lower().endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
+    stem = _stem(path)
     out["name"] = f"{overlay.get('name') or stem} [{frame + 1}/{frame_count(path)}]"
     if overlay.get("clim") is None:
         out.update(_series_scale(path, overlay))
