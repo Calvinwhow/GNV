@@ -149,12 +149,16 @@ def library():
     prepared backdrop. Each entry says how it will be drawn, so the panel can
     say so: ``mm`` is its own voxel size, ``preview_mm`` and ``export_mm`` the
     levels it is drawn at while working and for hi-res / export."""
-    from gnv.paths import index
+    from gnv.paths import compressed_backdrops, index
 
     out = []
+    compressed = compressed_backdrops()
     entries = [(name, path, "packaged", "Packaged volumes", f"{name} (packaged)", "") for name, path in LIBRARY.items()]
     entries += [(e["name"], Path(e["file"]), "backdrop", s["label"], e.get("label", e["name"]), e.get("hint", "")) for s in index("backdrops") for e in s["entries"] if e["name"] not in LIBRARY]
     for name, path, kind, section, label, hint in entries:
+        if name in compressed:
+            out.append({"name": name, "path": str(path), "kind": kind, "section": section, "label": label, "hint": hint, "compressed": True, "bytes": compressed[name].stat().st_size})
+            continue
         if not Path(path).is_file():
             continue
         item = {"name": name, "path": str(path), "kind": kind, "section": section, "label": label, "hint": hint}
@@ -179,6 +183,10 @@ def resolve_source(source):
         found = _backdrops().get(text)
         if found is not None:
             return str(found)
+        from gnv.paths import compressed_backdrops, compressed_error
+
+        if text in compressed_backdrops():
+            raise compressed_error(text)
     return str(Path(text).expanduser())
 
 

@@ -823,12 +823,17 @@ function sliceBody(b, L, set){
     chosen = SLICE_INFO.get(L.backdrop) || null;
   }
   const options = [{value:'', label: lib.length ? '— choose —' : '— none prepared yet —'},
-    ...lib.map(d => ({value: d.path, section: d.section, label: d.label, hint: d.hint}))];
+    ...lib.map(d => ({value: d.path, section: d.section, label: d.label + (d.compressed ? ' · compressed' : ''), hint: d.hint}))];
   for (const [path, name] of TEMP_BODIES)
     if (/\.nii(\.gz)?$/i.test(path)) options.push({value: path, label: 'temporary · ' + name});
   const current = lib.find(d => d.path === L.backdrop || d.name === L.backdrop);
-  const pickBox = select(options, current ? current.path : (L.backdrop || ''),
-                         v => set('backdrop', v || null));
+  const pickBox = select(options, current ? current.path : (L.backdrop || ''), v => {
+    const picked = lib.find(d => d.path === v);
+    if (picked && picked.compressed){
+      unpackBackdrop(picked.name).then(() => { set('backdrop', v); drawLayers(); }).catch(e => status(e.message, true));
+      return;
+    }
+    set('backdrop', v || null); });
   field(b, 'Backdrop', pickBox);
   pickedHint(b, options, current ? current.path : L.backdrop);
   const row = pickBox.closest('.row');
@@ -852,6 +857,10 @@ function sliceBody(b, L, set){
   const routes = el('div', 'inline'); routes.append(open, convert);
   field(b, '', routes);
 
+  if (chosen && chosen.compressed){
+    compressedNote(b, chosen, () => { set('backdrop', chosen.path); drawLayers(); });
+    return;
+  }
   if (!chosen){
     b.appendChild(el('div','hint',
       'Converted volumes accumulate in ' + ((BACKDROPS && BACKDROPS.dir) || '?') +
@@ -952,7 +961,7 @@ function volumeBody(b, L, set){
    * set by path in an older figure still shows, under its file name. */
   const lib = VOLUMES || [];
   const entry = lib.find(v => v.name === L.source);
-  const options = lib.map(v => ({value: v.name, label: v.label || v.name, section: v.section, hint: v.hint}));
+  const options = lib.map(v => ({value: v.name, label: (v.label || v.name) + (v.compressed ? ' · compressed' : ''), section: v.section, hint: v.hint}));
   /* Temporary bodies -- NIfTIs dropped or opened this session, drawn straight
    * from the file -- follow the prepared ones, so a second volume layer can
    * pick one too. They are not kept anywhere: reload and they are gone. */
@@ -963,8 +972,15 @@ function volumeBody(b, L, set){
   if (!L.source) options.unshift({value: '', label: '— choose —'});
   /* A region and its table belong to one atlas; a new body starts whole. */
   const newBody = path => { L.body_labels = []; L.body_lut = null; set('source', path); };
-  const body = field(b, 'Body', select(options, L.source || '', v => newBody(v || null)));
+  const body = field(b, 'Body', select(options, L.source || '', v => {
+    const picked = lib.find(e => e.name === v);
+    if (picked && picked.compressed){
+      unpackBackdrop(picked.name).then(() => newBody(v)).catch(e => status(e.message, true));
+      return;
+    }
+    newBody(v || null); }));
   pickedHint(b, options, L.source);
+  if (entry && entry.compressed) compressedNote(b, entry, () => { set('source', entry.name); drawLayers(); });
   layerFrames(b, L, set);
   const row = body.closest('.row');
   row.title = 'drop a NIfTI here to use it as the body, temporarily (with its .lut, for an atlas)';
@@ -2067,10 +2083,26 @@ async function runJob(start){
   for (;;){
     const j = await getJSON('/api/backdrops/job');
     if (!j.running){ if (j.error) throw new Error(j.error); return j; }
-    status(`${j.kind === 'pack-make' ? 'writing' : 'installing'} ${j.name} … ${(j.progress * 100).toFixed(0)}%`);
+    const doing = {'pack-make': 'writing', compress: 'compressing', expand: 'unpacking'}[j.kind] || 'installing';
+    status(`${doing} ${j.name} … ${(j.progress * 100).toFixed(0)}%`);
     await new Promise(r => setTimeout(r, 800));
   }
 }
+/* A compressed backdrop is unpacked when it is chosen (Library → Compress
+ * large files kept one copy of it to save space); this waits for that. */
+async function unpackBackdrop(name){
+  await runJob(() => postJSON('/api/backdrops/expand', {name}));
+  await afterLibraryChange();
+  status(`${name} unpacked`);
+}
+function compressedNote(b, item, use){
+  b.appendChild(el('div', 'hint', `${item.label || item.name} is compressed to save space (${fmtBytes(item.bytes)}). ` +
+    'Unpacking rebuilds it — minutes for a large one — and it stays unpacked afterwards.'));
+  const go = el('button', null, 'Unpack');
+  go.onclick = () => unpackBackdrop(item.name).then(use).catch(e => status(e.message, true));
+  field(b, '', go);
+}
+
 async function afterLibraryChange(){
   CAT = await getJSON('/api/catalogue');
   await refreshBackdrops(); await refreshVolumes();
@@ -2113,7 +2145,24 @@ async function drawLibrary(){
       } catch (e) { status(e.message, true); }
     });
   };
-  const routes = el('div', 'inline'); routes.append(install, make);
+  const squeeze = el('button', null, 'Compress large files …');
+  squeeze.title = 'keep each large backdrop of your library as one compressed copy, about a quarter of its size; it is unpacked again when next chosen';
+  squeeze.onclick = async () => {
+    const big = lib.backdrops.filter(it => !it.shipped && !it.compressed && it.bytes >= 1e9);
+    if (!big.length){ status('nothing to compress: no backdrop of 1 GB or more in your library', true); return; }
+    const total = big.reduce((sum, it) => sum + it.bytes, 0);
+    if (!confirm(`Compress ${big.length} backdrop(s), ${fmtBytes(total)} in all, to about a quarter of that?\n\n` +
+                 big.map(it => `${it.label} (${fmtBytes(it.bytes)})`).join('\n') +
+                 '\n\nOne the open figure uses is left as it is. Each is unpacked again, which takes minutes for a large one, ' +
+                 'the next time it is chosen.')) return;
+    try {
+      const j = await runJob(() => postJSON('/api/backdrops/compress', {}));
+      const r = j.result;
+      status(`compressed ${r.count} backdrop(s): ${fmtBytes(r.before)} → ${fmtBytes(r.after)}`);
+      await afterLibraryChange();
+    } catch (e) { status(e.message, true); }
+  };
+  const routes = el('div', 'inline'); routes.append(install, make, squeeze);
   host.appendChild(routes);
   for (const [kind, title, list] of [['meshes', 'Meshes', lib.meshes], ['backdrops', 'Backdrops', lib.backdrops], ['fibers', 'Fiber sets', lib.fibers || []]]){
     host.appendChild(el('div', 'lib-head', title));
@@ -2122,8 +2171,9 @@ async function drawLibrary(){
       const row = el('label', 'region');
       const box = el('input'); box.type = 'checkbox';
       row.title = it.section + ' · ' + it.name;
-      row.append(box, el('span', null, it.label), el('span', 'lib-tag', (it.shipped ? 'built in · ' : '') + (it.bytes ? fmtBytes(it.bytes) : 'files missing')));
-      if (!it.bytes) box.disabled = true;
+      row.append(box, el('span', null, it.label), el('span', 'lib-tag', (it.shipped ? 'built in · ' : '') + (it.compressed ? 'compressed · ' : '') + (it.bytes ? fmtBytes(it.bytes) : 'files missing')));
+      if (!it.bytes || it.compressed) box.disabled = true;
+      if (it.compressed) row.title += ' · compressed: choose it in a layer to unpack it before putting it in a pack';
       host.appendChild(row);
       ticked.push({box, item: {kind, name: it.name}});
     });

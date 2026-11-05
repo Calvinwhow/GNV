@@ -412,6 +412,31 @@ def create_app(spec=None, drop_dir=None):
         except Exception as exc:
             return _error(exc)
 
+    @app.post("/api/backdrops/compress")
+    def api_compress_backdrops():
+        """Compress the large backdrops of this user's library that the open
+        figure is not using (a background job, polled on the job endpoint)."""
+        from .backdrop_jobs import start_compress
+
+        try:
+            with lock:
+                in_use = [layer.get("backdrop") for layer in session.spec["layers"] if layer["kind"] == "slices"]
+                in_use += [layer.get("source") for layer in session.spec["layers"] if layer["kind"] == "volume"]
+                session.forget_backdrops()
+            return jsonify(start_compress(in_use))
+        except Exception as exc:
+            return _error(exc)
+
+    @app.post("/api/backdrops/expand")
+    def api_expand_backdrop():
+        """Unpack a compressed backdrop (a background job)."""
+        from .backdrop_jobs import start_expand
+
+        try:
+            return jsonify(start_expand((request.get_json(force=True) or {}).get("name", "")))
+        except Exception as exc:
+            return _error(exc)
+
     @app.get("/api/backdrops/job")
     def api_backdrop_job():
         from .backdrop_jobs import status as job_status

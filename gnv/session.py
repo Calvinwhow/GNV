@@ -1742,6 +1742,15 @@ class RenderSession:
                                           * self._line_scale)
         return image
 
+    def forget_backdrops(self):
+        """Close every open backdrop, so their files can be replaced (a
+        compressed library) -- the next slice reopens what it needs."""
+        for back in self._backdrops.values():
+            close = getattr(back, "close", None)
+            if close:
+                close()
+        self._backdrops.clear()
+
     def backdrop(self, reference):
         """An open Backdrop, kept for the session so slices stay ~1 ms reads.
 
@@ -1757,6 +1766,12 @@ class RenderSession:
         path = Path(text).expanduser()
         if not path.suffix:
             path = prepared_backdrops().get(text, path)
+        if not path.exists():
+            from .paths import compressed_backdrops, compressed_error
+
+            held = compressed_backdrops()
+            if text in held or any(str(c.parent.parent / c.name) == text for c in held.values()):
+                raise compressed_error(path.stem)
         key = str(path)
         if key not in self._backdrops:
             if text.lower().endswith((".nii", ".nii.gz")):

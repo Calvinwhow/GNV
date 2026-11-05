@@ -183,5 +183,11 @@ def library():
             return sum(p.stat().st_size for p, _ in _item_files(kind, entry))
         except FileNotFoundError:
             return 0
+    from .paths import compressed_backdrops
+
+    compressed = compressed_backdrops()
     listing = {kind: [{"name": e["name"], "label": e.get("label", e["name"]), "section": s["label"], "shipped": e["shipped"], "bytes": size(kind, e)} for s in index(kind) for e in s["entries"] if _entry_paths(relative_entry(e))] for kind in KINDS}
+    for item in listing.get("backdrops", []):
+        if item["name"] in compressed:
+            item.update(compressed=True, bytes=compressed[item["name"]].stat().st_size)
     return {"dir": str(LIBRARY_DIR), **listing}

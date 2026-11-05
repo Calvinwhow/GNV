@@ -112,6 +112,19 @@ def prepared_backdrops():
     return {n: Path(e["file"]) for n, e in entries("backdrops").items() if Path(e["file"]).is_file()}
 
 
+def compressed_backdrops():
+    """``{name: compressed copy}`` for every indexed backdrop that is kept
+    compressed until it is next chosen (``backdrops.compress_backdrop``)."""
+    from gnv.convert.backdrops import compressed_path
+
+    return {n: compressed_path(e["file"]) for n, e in entries("backdrops").items() if not Path(e["file"]).is_file() and compressed_path(e["file"]).is_file()}
+
+
+def compressed_error(name):
+    """The error for using a backdrop that is compressed."""
+    return FileNotFoundError(f"{name} is compressed to save space; choose it again in its layer's list to unpack it")
+
+
 def prepared_atlases():
     """``{name: folder}`` for every indexed folder of region meshes that is there."""
     return {n: Path(e["parcels"]) for n, e in entries("meshes").items() if "parcels" in e and Path(e["parcels"]).is_dir()}

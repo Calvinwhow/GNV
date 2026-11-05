@@ -33,14 +33,20 @@ def catalogue():
     entry with what its archive says about itself."""
     from gnv.convert.backdrops import Backdrop, list_backdrops
 
+    from .paths import compressed_backdrops
+
     items, read = [], {}
+    compressed = compressed_backdrops()
     for section in index("backdrops"):
         for spec in section["entries"]:
             folder = str(Path(spec["file"]).parent)
             if folder not in read:
                 read[folder] = {e["path"]: e for e in list_backdrops(folder)}
-            entry = dict(read[folder].get(spec["file"], {"path": spec["file"], "error": "file not found"}), name=spec["name"], label=spec.get("label", spec["name"]), hint=spec.get("hint", ""), section=section["label"], shipped=spec["shipped"])
-            if "error" not in entry:
+            found = read[folder].get(spec["file"], {"path": spec["file"], "error": "file not found"})
+            if spec["name"] in compressed:
+                found = {"path": spec["file"], "compressed": True, "bytes": compressed[spec["name"]].stat().st_size}
+            entry = dict(found, name=spec["name"], label=spec.get("label", spec["name"]), hint=spec.get("hint", ""), section=section["label"], shipped=spec["shipped"])
+            if "error" not in entry and not entry.get("compressed"):
                 try:
                     with Backdrop(entry["path"]) as back:
                         lo, hi = back.bounds()
@@ -187,6 +193,51 @@ def _finish(work, path=None):
     except Exception as exc:
         with _lock:
             _state.update(running=False, error=f"{type(exc).__name__}: {exc}")
+
+
+def start_compress(in_use=(), min_bytes=1e9):
+    """Compress every backdrop of ``min_bytes`` or more in this user's library
+    (never a built-in one, nor one in ``in_use``, the open figure's) to a single
+    copy, unpacked again when it is next chosen (``backdrops.compress_backdrop``)."""
+    held = {str(n) for n in in_use if n}
+    todo = [(name, Path(e["file"])) for name, e in entries("backdrops").items()
+            if not e["shipped"] and Path(e["file"]).is_file() and Path(e["file"]).stat().st_size >= min_bytes
+            and name not in held and e["file"] not in held]
+    if not todo:
+        raise ValueError(f"nothing to compress: no backdrop of {min_bytes / 1e9:g} GB or more in your library that the open figure is not using")
+    _begin("compress", f"{len(todo)} backdrop(s)")
+    Thread(target=_finish, args=(lambda: _compress_all(todo),), daemon=True).start()
+    return status()
+
+
+def _compress_all(todo):
+    from gnv.convert.backdrops import compress_backdrop
+
+    before = after = 0
+    for i, (name, path) in enumerate(todo):
+        with _lock:
+            _state["name"] = f"{name} ({i + 1} of {len(todo)})"
+        b, a = compress_backdrop(path, progress=lambda f, i=i: _report((i + f) / len(todo)))
+        before, after = before + b, after + a
+    return {"count": len(todo), "names": [n for n, _ in todo], "before": before, "after": after}
+
+
+def start_expand(name):
+    """Unpack the compressed backdrop ``name`` back into its archive (``backdrops.expand_backdrop``)."""
+    from .paths import compressed_backdrops
+
+    if name not in compressed_backdrops():
+        raise FileNotFoundError(f"{name} is not a compressed backdrop")
+    path = Path(entries("backdrops")[name]["file"])
+    _begin("expand", name)
+
+    def work():
+        from gnv.convert.backdrops import expand_backdrop
+
+        return {"path": str(expand_backdrop(path, progress=_report))}
+
+    Thread(target=_finish, args=(work, str(path)), daemon=True).start()
+    return status()
 
 
 def start_install(path):

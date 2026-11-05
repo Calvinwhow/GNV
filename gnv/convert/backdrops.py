@@ -41,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["BACKDROP_DIR", "build_backdrop", "list_backdrops", "Backdrop"]
+__all__ = ["BACKDROP_DIR", "build_backdrop", "compress_backdrop", "expand_backdrop", "compressed_path", "list_backdrops", "Backdrop"]
 
 # Outside the package: a library of these runs to hundreds of megabytes and has
 # no business inside a source tree. Overridable, and created on first use.
@@ -199,18 +199,8 @@ def build_backdrop(nifti, out_dir=None, mm=None, name=None, window=None, slab_by
     target = out_dir / f"{_slug(name or path.name.split('.nii')[0])}.npz"
 
     bbox = _data_box(source, convert, shape, width, lambda f: report(0.3 * f))
-    box = int(np.prod([high - low for low, high in bbox]))
-    scratch = _scratch_dir(target, path, 2 * box, int(1.2 * box)) / f".{target.stem}.building"
-    partial = target.with_name(f".{target.name}.partial")
-    scratch.mkdir(parents=True, exist_ok=True)
-    try:
-        _write_archive(partial, source, convert, bbox, img.affine, zooms, factors, mm, (lo, hi), path, scratch, slab_bytes, width, compresslevel, workers, report)
-        partial.replace(target)
-    finally:
-        import shutil
-
-        shutil.rmtree(scratch, ignore_errors=True)
-        partial.unlink(missing_ok=True)
+    meta = _meta(bbox, img.affine, zooms, factors, mm, (lo, hi), path)
+    _assemble(target, meta, _box_chunks(source, convert, bbox, width), path, slab_bytes, compresslevel, workers, lambda f: report(0.3 + 0.7 * f))
     return target
 
 
@@ -249,43 +239,72 @@ def _finish_bounds(bounds, shape):
     return out
 
 
-def _scratch_dir(target, source, scratch_bytes, archive_bytes):
+def _scratch_dir(target, near, scratch_bytes, archive_bytes):
     """Where the re-ordered copies go: beside the archive if its disk holds them
     and the archive (about 1.2x the box: three axes of a noisy high-res scan
-    compress about 2.8x),
-    otherwise beside the source."""
+    compress about 2.8x), otherwise beside ``near`` -- the source being read."""
     import os
     import shutil
 
     home = os.stat(target.parent).st_dev
-    for folder in (target.parent, source.parent):
+    for folder in (target.parent, near.parent):
         need = scratch_bytes + (archive_bytes if os.stat(folder).st_dev == home else 0)
         if shutil.disk_usage(folder).free >= need:
             return folder
     gb = 1e9
-    raise OSError(f"converting {source.name} needs {scratch_bytes / gb:.0f} GB of scratch space while it runs, plus about "
+    raise OSError(f"building {target.name} needs {scratch_bytes / gb:.0f} GB of scratch space while it runs, plus about "
                   f"{archive_bytes / gb:.0f} GB for the archive in {target.parent}; free "
                   f"{shutil.disk_usage(target.parent).free / gb:.0f} GB there, or "
-                  f"{shutil.disk_usage(source.parent).free / gb:.0f} GB beside the source, and try again")
+                  f"{shutil.disk_usage(near.parent).free / gb:.0f} GB beside {near.name}, and try again")
 
 
-def _write_archive(target, source, convert, bbox, source_affine, zooms, factors, mm, window, origin, scratch, slab_bytes, width, compresslevel, workers, report):
-    """Passes 2-4: every slice of every axis into the archive (see ``build_backdrop``)."""
+def _meta(bbox, source_affine, zooms, factors, mm, window, origin):
+    """The archive's header. Cropping to the data shifts the origin, and the
+    affine has to follow or every slider reads the wrong millimetre."""
     (x0, x1), (y0, y1), (z0, z1) = bbox
-    nx, ny, nz = x1 - x0, y1 - y0, z1 - z0
-
-    # Cropping to the data shifts the origin, and the affine has to follow or
-    # every slider reads the wrong millimetre.
     affine = np.asarray(source_affine, float).copy()
     affine[:3, :3] = affine[:3, :3] @ np.diag(factors.astype(float))
     affine[:3, 3] = affine[:3, 3] + affine[:3, :3] @ np.asarray([x0, y0, z0], float)
-    meta = {"shape": [nx, ny, nz], "affine": affine.tolist(), "mm": float(mm),
-            "window": list(window), "source": str(origin),
-            "zooms": (zooms * factors).tolist()}
+    return {"shape": [x1 - x0, y1 - y0, z1 - z0], "affine": affine.tolist(), "mm": float(mm),
+            "window": list(window), "source": str(origin), "zooms": (zooms * factors).tolist()}
+
+
+def _box_chunks(source, convert, bbox, width):
+    """``(z, chunk)``: the box's z-planes read from the source, as uint8 (x, y, n) chunks."""
+    (x0, x1), (y0, y1), (z0, z1) = bbox
+    fz = source.fz
+    for z, planes in source.slabs(width, z0 * fz, min(z1 * fz, source.shape[2])):
+        yield z // fz - z0, convert(planes)[x0:x1, y0:y1]
+
+
+def _assemble(target, meta, chunks, near, slab_bytes, compresslevel, workers, report):
+    """Write the archive ``target`` from its z-planes (see ``_write_archive``),
+    beside it as a partial file renamed into place when complete, with its
+    scratch folder removed whatever happens."""
+    import shutil
+
+    box = int(np.prod(meta["shape"]))
+    scratch = _scratch_dir(target, Path(near), 2 * box, int(1.2 * box)) / f".{target.stem}.building"
+    partial = target.with_name(f".{target.name}.partial")
+    scratch.mkdir(parents=True, exist_ok=True)
+    try:
+        _write_archive(partial, meta, chunks, scratch, slab_bytes, compresslevel, workers, report)
+        partial.replace(target)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        partial.unlink(missing_ok=True)
+
+
+def _write_archive(target, meta, chunks, scratch, slab_bytes, compresslevel, workers, report):
+    """Every slice of every axis into the archive, from ``chunks`` of z-planes
+    in order (see ``build_backdrop``): the z-slices as they arrive, the box
+    copied twice to scratch re-ordered for x and y, then the y-slices and the
+    x-slices from those copies. ``report`` gets 0..1."""
+    nx, ny, nz = meta["shape"]
 
     # The re-ordered copies: block b of ``by_x`` holds x-slices b*bx.. as one
-    # contiguous (z, y, bx) run, and ``by_y`` likewise for y. Each z-chunk read
-    # in pass 2 lands in every block as one contiguous write.
+    # contiguous (z, y, bx) run, and ``by_y`` likewise for y. Each z-chunk
+    # lands in every block as one contiguous write.
     bx = max(1, min(nx, int(slab_bytes) // (ny * nz)))
     by = max(1, min(ny, int(slab_bytes) // (nx * nz)))
     by_x = np.memmap(scratch / "by_x.raw", dtype=np.uint8, mode="w+", shape=(-(-nx // bx), nz, ny, bx))
@@ -293,11 +312,7 @@ def _write_archive(target, source, convert, bbox, source_affine, zooms, factors,
 
     with _Archive(target, compresslevel, workers) as archive:
         archive.put("meta", np.frombuffer(json.dumps(meta).encode(), dtype=np.uint8))
-        fz = source.fz
-        start, stop = z0 * fz, min(z1 * fz, source.shape[2])
-        for z, planes in source.slabs(width, start, stop):
-            k = z // fz - z0
-            chunk = convert(planes)[x0:x1, y0:y1]
+        for k, chunk in chunks:
             n = chunk.shape[2]
             for i in range(n):
                 archive.put(f"a2_{k + i:05d}", chunk[:, :, i])
@@ -307,7 +322,7 @@ def _write_archive(target, source, convert, bbox, source_affine, zooms, factors,
             for b in range(by_y.shape[0]):
                 part = chunk[:, b * by:(b + 1) * by]
                 by_y[b, k:k + n, :part.shape[1], :] = part.transpose(2, 1, 0)
-            report(0.3 + 0.35 * min(z + width - start, stop - start) / max(stop - start, 1))
+            report(0.5 * (k + n) / nz)
         by_x.flush()
         by_y.flush()
 
@@ -315,7 +330,7 @@ def _write_archive(target, source, convert, bbox, source_affine, zooms, factors,
             block = np.array(by_y[b])                 # (z, by, x): one contiguous read
             for i in range(min(by, ny - b * by)):
                 archive.put(f"a1_{b * by + i:05d}", block[:, i, :].T)
-            report(0.65 + 0.175 * (b + 1) / by_y.shape[0])
+            report(0.5 + 0.25 * (b + 1) / by_y.shape[0])
         del by_y
         (scratch / "by_y.raw").unlink()
 
@@ -323,31 +338,150 @@ def _write_archive(target, source, convert, bbox, source_affine, zooms, factors,
             block = np.array(by_x[b])                 # (z, y, bx)
             for i in range(min(bx, nx - b * bx)):
                 archive.put(f"a0_{b * bx + i:05d}", block[:, :, i].T)
-            report(0.825 + 0.175 * (b + 1) / by_x.shape[0])
+            report(0.75 + 0.25 * (b + 1) / by_x.shape[0])
         del by_x
 
 
-def _deflate(name, array, level):
-    """One slice as a compressed ``.npy`` member: ``(name, size, crc, data)``."""
+# -- compressed copies ------------------------------------------------------------
+# An archive holds its volume three times, once per axis, so any slice is one
+# quick read. One kept for later rather than for now can be shrunk to a single
+# copy -- its z-slices, bzip2 at its strongest, about a quarter of the archive --
+# and rebuilt from it when it is next chosen. Both are standard .npz files.
+
+COMPRESSED_DIR = "compressed"
+
+
+def compressed_path(path):
+    """Where the compressed copy of the archive ``path`` is kept: ``compressed/<name>.npz`` beside it."""
+    path = Path(path)
+    return path.parent / COMPRESSED_DIR / path.name
+
+
+def _read_planes(path, count, workers=None):
+    """``(k, slice)`` for the first ``count`` z-slices of an archive, in order,
+    read and decompressed by several threads, each with its own handle."""
+    import os
+    import threading
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+
+    local, opened = threading.local(), []
+
+    def read(k):
+        if not hasattr(local, "store"):
+            local.store = np.load(path)
+            opened.append(local.store)
+        return local.store[f"a2_{k:05d}"]
+
+    workers = workers or os.cpu_count() or 4
+    try:
+        with ThreadPoolExecutor(workers) as pool:
+            pending = deque()
+            for k in range(count):
+                pending.append((k, pool.submit(read, k)))
+                if len(pending) > 2 * workers:
+                    j, future = pending.popleft()
+                    yield j, future.result()
+            while pending:
+                j, future = pending.popleft()
+                yield j, future.result()
+    finally:
+        for store in opened:
+            store.close()
+
+
+def compress_backdrop(path, workers=None, progress=None):
+    """Replace the archive ``path`` with its compressed copy (see above) and
+    return ``(bytes before, bytes after)``. The copy is complete and in place
+    before the archive is deleted."""
+    import os
+    import zipfile
+
+    path = Path(path)
+    out = compressed_path(path)
+    out.parent.mkdir(exist_ok=True)
+    partial = out.with_name(f".{out.name}.partial")
+    report = progress or (lambda fraction: None)
+    with np.load(path) as store:
+        meta = json.loads(bytes(store["meta"]).decode())
+    nz = meta["shape"][2]
+    # The archive's date goes with it, so the volume levels built from it are
+    # still current when it comes back.
+    header = dict(meta, archive_mtime=os.path.getmtime(path))
+    try:
+        with _Archive(partial, 9, workers, zipfile.ZIP_BZIP2) as archive:
+            archive.put("meta", np.frombuffer(json.dumps(header).encode(), dtype=np.uint8))
+            for k, plane in _read_planes(path, nz, workers):
+                archive.put(f"a2_{k:05d}", plane)
+                report((k + 1) / nz)
+        partial.replace(out)
+    finally:
+        partial.unlink(missing_ok=True)
+    before = path.stat().st_size
+    path.unlink()
+    return before, out.stat().st_size
+
+
+def expand_backdrop(path, slab_bytes=1 << 30, compresslevel=4, workers=None, progress=None):
+    """Rebuild the archive ``path`` from its compressed copy and delete the copy.
+    It comes back as it was: the same slices, header and date."""
+    import os
+
+    path = Path(path)
+    compact = compressed_path(path)
+    with np.load(compact) as store:
+        meta = json.loads(bytes(store["meta"]).decode())
+    mtime = meta.pop("archive_mtime", None)
+    nx, ny, nz = meta["shape"]
+    width = max(1, int(slab_bytes) // max(nx * ny, 1))
+
+    def chunks():
+        planes = _read_planes(compact, nz, workers)
+        for k in range(0, nz, width):
+            chunk = np.empty((nx, ny, min(width, nz - k)), np.uint8, order="F")
+            for i in range(chunk.shape[2]):
+                chunk[:, :, i] = next(planes)[1]
+            yield k, chunk
+
+    _assemble(path, meta, chunks(), compact, slab_bytes, compresslevel, workers, progress or (lambda fraction: None))
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    compact.unlink()
+    try:
+        compact.parent.rmdir()          # only when it is empty
+    except OSError:
+        pass
+    return path
+
+
+def _pack(name, array, level, method):
+    """One slice as a compressed ``.npy`` member: ``(name, method, size, crc, data)``."""
+    import bz2
     import io
+    import zipfile
     import zlib
 
     buffer = io.BytesIO()
     np.lib.format.write_array(buffer, np.ascontiguousarray(array), allow_pickle=False)
     raw = buffer.getvalue()
-    packer = zlib.compressobj(level, zlib.DEFLATED, -15)
-    return f"{name}.npy", len(raw), zlib.crc32(raw), packer.compress(raw) + packer.flush()
+    if method == zipfile.ZIP_BZIP2:
+        data = bz2.compress(raw, level)
+    else:
+        packer = zlib.compressobj(level, zlib.DEFLATED, -15)
+        data = packer.compress(raw) + packer.flush()
+    return f"{name}.npy", method, len(raw), zlib.crc32(raw), data
 
 
 class _Archive:
     """A zip of ``.npy`` members, compressed by several threads and written in order.
 
-    Deflating the slices is most of a build's time, and zlib lets go of the GIL,
-    so slices are compressed in parallel and their bytes written as finished
-    members: a standard zip, read by ``np.load`` like any ``.npz``.
+    Compressing the slices is most of a build's time, and zlib and bz2 let go of
+    the GIL, so slices are compressed in parallel and their bytes written as
+    finished members: a standard zip, read by ``np.load`` like any ``.npz``.
+    ``method`` is deflate (zlib) or bzip2.
     """
 
-    def __init__(self, path, level, workers=None):
+    def __init__(self, path, level, workers=None, method=None):
         import os
         import zipfile
         from collections import deque
@@ -355,22 +489,23 @@ class _Archive:
 
         self.zip = zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
         self.level = level
+        self.method = zipfile.ZIP_DEFLATED if method is None else method
         workers = workers or os.cpu_count() or 4
         self.pool = ThreadPoolExecutor(workers)
         self.pending = deque()
         self.limit = 2 * workers
 
     def put(self, name, array):
-        self.pending.append(self.pool.submit(_deflate, name, array, self.level))
+        self.pending.append(self.pool.submit(_pack, name, array, self.level, self.method))
         while len(self.pending) > self.limit:
             self._write(*self.pending.popleft().result())
 
-    def _write(self, name, size, crc, data):
+    def _write(self, name, method, size, crc, data):
         import time
         import zipfile
 
         info = zipfile.ZipInfo(name, date_time=time.localtime(time.time())[:6])
-        info.compress_type = zipfile.ZIP_DEFLATED
+        info.compress_type = method
         info.file_size, info.compress_size, info.CRC = size, len(data), crc
         info.external_attr = 0o644 << 16
         zf = self.zip
