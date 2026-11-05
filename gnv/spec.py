@@ -216,11 +216,6 @@ OVERLAY = {
     "extend_mm": 0.0,
     # Which frame of a 4D map (or of a fibres x time value array) is shown.
     "frame": 0,
-    # How far the colour scale overrides what is under it, 0..1. At 1 every
-    # value kept is painted at full strength, below-minimum values in the
-    # bottom colour (MRIcroGL's look); lower lets a LUT's own alpha ramp fade
-    # the low end of the scale into the anatomy.
-    "override": 1.0,
     # Volume layers only. X-RAY is a property of the map, not of the brain:
     # 0 paints this map on the tissue the rays reach (the cortex, a cut face);
     # above 0 it is seen THROUGH the brain as well, tinting the surface above
@@ -474,12 +469,6 @@ def normalize_spec(spec):
 
         if kind in ("mesh", "slices", "fibers", "volume"):
             layer["overlays"] = _overlays(raw, layer, _legacy_xray(raw, kind))
-            if kind == "volume":
-                # A body's maps are always painted at full strength: "Override
-                # brain" is not offered there, so an older figure's setting is
-                # not left acting where it cannot be seen or changed.
-                for overlay in layer["overlays"]:
-                    overlay["override"] = 1.0
 
         if kind == "electrode":
             layer["hidden_regions"] = [str(r) for r in
@@ -614,8 +603,6 @@ def _overlays(raw, layer, inherited=None):
         item["opacity"] = min(max(float(item["opacity"]), 0.0), 1.0)
         item["smooth_mm"] = min(max(float(item.get("smooth_mm") or 0.0), 0.0), 20.0)
         item["frame"] = max(int(item.get("frame") or 0), 0)
-        item["override"] = min(max(float(1.0 if item.get("override") is None
-                                         else item["override"]), 0.0), 1.0)
         item["xray_mm"] = min(max(float(item.get("xray_mm") or 0.0), 0.0), 300.0)
         item["fade"] = min(max(float(item.get("fade") or 0.0), 0.0), 1.0)
         for key in ("threshold", "max_value", "min_value", "clim"):

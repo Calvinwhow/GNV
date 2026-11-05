@@ -612,16 +612,6 @@ function overlayStack(b, L, set, kind){
     op.value = o.opacity;
     op.oninput = () => { o.opacity = parseFloat(op.value); set('overlays', stack); };
     field(body, 'Opacity', op);
-    /* How much the colour scale overrides what is under it. A LUT such as
-     * MRIcroGL's x_rain fades its own low end out; at 1 every value is painted
-     * at full strength -- the bottom colour included, and anything below the
-     * minimum in that colour -- as MRIcroGL draws it. Lower lets the low end
-     * of the scale fade into the anatomy. */
-    const ovr = el('input'); ovr.type='range'; ovr.min=0; ovr.max=1; ovr.step=0.05;
-    ovr.value = o.override ?? 1;
-    ovr.title = 'how strongly the colour scale overrides the anatomy at its low end';
-    ovr.oninput = () => { o.override = parseFloat(ovr.value); set('overlays', stack); };
-    if (kind !== 'volume') field(body, 'Override brain', ovr);
     if (kind === 'volume') xrayControls(body, o, stack, set);
     if (kind !== 'fibers') outlineControls(body, o, stack, set);
     card.appendChild(body);

@@ -72,24 +72,15 @@ def overlay_colours(values, overlay):
     sampled = cmap(scaled)
     rgb[present] = sampled[..., :3]
 
-    # MRIcroGL's LUTs ramp alpha up from zero, which is how a hot-iron overlay
-    # fades in at the bottom of its scale instead of laying a slab of dark red
-    # over the anatomy. That SHAPE is worth keeping; its ceiling is not -- the
-    # files cap at 128/255 -- so it is renormalised to the overlay's own opacity
-    # and the slider still means what it says.
-    shape = sampled[..., 3]
-    ceiling = float(np.max(cmap(np.linspace(0, 1, 256))[:, 3]))
-    if ceiling > 0 and ceiling < 0.999:
-        shape = shape / ceiling
-    # How far the colour scale overrides what is under it, 0..1. At 1 every
-    # value the overlay keeps is painted at full strength -- the bottom of the
-    # scale (and anything below it) in the bottom colour, as MRIcroGL draws a
-    # LUT -- and at 0 the LUT's own alpha ramp fades the low end out. Absent
-    # (None) keeps the ramp, as before this setting existed.
-    override = overlay.get("override")
-    if override is not None:
-        override = min(max(float(override), 0.0), 1.0)
-        shape = shape + override * (1.0 - np.clip(shape, 0.0, 1.0))
+    # Every value the overlay keeps is painted at its opacity -- the bottom of
+    # the scale (and anything below it) in the bottom colour, as MRIcroGL draws
+    # a LUT -- shaped only by an alpha the palette was built to have: a
+    # mosaic's soft threshold fades its low end in that way. MRIcroGL's .clut
+    # files carry an alpha ramp of their own, which is not used. (Every other
+    # palette is opaque.)
+    from gnv.render.palettes import is_clut
+
+    shape = 1.0 if is_clut(overlay.get("palette")) else sampled[..., 3]
     alpha[present] = np.clip(shape, 0.0, 1.0) * float(overlay.get("opacity", 1.0))
 
     if overlay.get("hide_below_min"):

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["CLUT_DIRS", "palette_catalogue", "resolve_palette", "read_clut",
+__all__ = ["CLUT_DIRS", "is_clut", "palette_catalogue", "resolve_palette", "read_clut",
            "opaque", "MATPLOTLIB_PICKS"]
 
 # Where MRIcroGL keeps them on macOS, plus a place of one's own.
@@ -109,6 +109,16 @@ def _clut_files():
         for path in entries:
             found.setdefault(path.stem, path)
     return found
+
+
+def is_clut(name):
+    """Whether the palette reference ``name`` is one of MRIcroGL's .clut files
+    (looked up as ``resolve_palette`` does: a .clut path, or a .clut name before
+    a matplotlib one)."""
+    if not isinstance(name, str) or not name or name.startswith("#"):
+        return False
+    path = Path(name).expanduser()
+    return (path.suffix == ".clut" and path.is_file()) or re.sub(r"\.clut$", "", name) in _clut_files()
 
 
 def palette_catalogue():

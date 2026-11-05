@@ -337,9 +337,8 @@ def _scale(mode, source, opts, overlay_fields):
     for ov in overlays:
         ov["symmetric"], ov["clim"] = symmetric, list(clim)
         if palette:
-            # The soft ramp IS the palette's alpha, so it must not be
-            # overridden to full strength.
-            ov["palette"], ov["override"] = palette, 0.0
+            # The soft ramp IS the palette's alpha, which an overlay honours.
+            ov["palette"] = palette
     return overlays, (first["name"] or _label(source), cmap, clim)
 
 
