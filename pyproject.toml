@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib",
     "h5py",
     "scikit-image",
+    "mitsuba",
     "calvin_utils @ git+https://github.com/Calvinwhow/CircuitPyPer.git@development",
 ]
 

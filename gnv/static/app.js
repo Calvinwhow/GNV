@@ -650,21 +650,23 @@ function meshBody(b, L, set){
   pickedHint(b, opts, L.mesh);
   /* OPEN surfaces a NIfTI straight from the file for this figure, exactly as
    * dropping it on the layer does; CONVERT ATLAS meshes one once into the
-   * library, kept in the Mesh list for every figure. */
+   * library, and CONVERT MESH brings in a surface made elsewhere -- both kept
+   * in the Mesh list for every figure. Each explains itself in its dialog. */
   const open = el('button', null, 'Open NIfTI …');
   open.title = 'surface a NIfTI straight from the file, for this figure only (you can also drop one on the layer)';
   open.onclick = () => chooseFile('volume', $('#m-path').value, p => {
     L.name = String(p).split('/').pop().split('.nii')[0]; L.tessellate = 0; L.split = 'auto';
-    set('mesh', p); status('surfacing ' + L.name + ' — this takes a moment …'); });
+    set('mesh', p); status('surfacing ' + L.name + ' — this takes a moment …'); },
+    {hint: 'Surfaces a volume straight from the file, for this figure only — nothing is converted or saved. ' +
+           'A 4D NIfTI plays as a time series. You can also drop a NIfTI on the layer.'});
   const convert = el('button', null, 'Convert atlas …');
   convert.title = 'mesh an atlas once into a prepared region set, kept in the Mesh list for every figure';
   convert.onclick = () => convertAtlas(set);
-  const routes = el('div', 'inline'); routes.append(open, convert);
+  const convertSurface = el('button', null, 'Convert mesh …');
+  convertSurface.title = 'bring a surface made elsewhere (Lead-DBS .mat, .stl, .obj, .ply, .gii, .mz3, .vtk) into the Mesh list, for every figure';
+  convertSurface.onclick = () => convertMesh(set);
+  const routes = el('div', 'inline row-of-three'); routes.append(open, convert, convertSurface);
   field(b, '', routes);
-  b.appendChild(el('div', 'hint',
-    'Open NIfTI surfaces a volume for this figure only; a 4D one plays as a time series. Convert atlas takes a 4D NIfTI ' +
-    '(one region per volume), a 3D label NIfTI (one region per value), or a folder of ' +
-    'NIfTIs (one region per file), and an optional .txt / .lut naming the regions.'));
 
   if (vol){
     /* Prepared backdrops first: they are already resampled and quantised, so
@@ -1191,7 +1193,27 @@ function convertAtlas(set){
     };
     if (confirm(ask)) chooseFile('labels', folder ? source : source.replace(/\/[^/]*$/, ''), go);
     else go(null);
-  }, {folder: true, title: 'Choose a 4D or label NIfTI, or a folder of NIfTIs'});
+  }, {folder: true, title: 'Choose a 4D or label NIfTI, or a folder of NIfTIs',
+       hint: 'Meshes an atlas once into a set of regions, kept in the Mesh list for every figure. A 4D NIfTI gives ' +
+             'one region per volume, a 3D label NIfTI one region per value, a folder of NIfTIs one region per file. ' +
+             'You can name the regions from a .txt or .lut table next.'});
+}
+
+/* Convert mesh: pick a surface file made elsewhere, or a folder of them, then a
+ * name for the Mesh list. The conversion runs as a job (backdrop_jobs.start_mesh)
+ * and the layer switches to the new mesh when it is ready. */
+function convertMesh(set){
+  chooseFile('mesh', $('#m-path').value, source => {
+    const stem = source.replace(/\/+$/, '').split('/').pop().replace(/\.[^.]+$/, '');
+    const name = prompt('Name for the mesh, as it will appear in the Mesh list (for a folder, the heading its surfaces are listed under):', stem);
+    if (!name) return;
+    postJSON('/api/meshes/convert', {path: source, name})
+      .then(() => { CONVERT_DONE = n => set('mesh', n); pollConvert(); })
+      .catch(e => status(e.message, true));
+  }, {folder: true, title: 'Choose a surface file, or a folder of them',
+      hint: 'Brings a surface made elsewhere into the Mesh list, for every figure: a Lead-DBS cortex (.mat, ' +
+            'left/right halves kept as a pair), Surf-Ice .mz3, .stl, .obj, .ply, GIfTI .gii or .vtk. A folder converts ' +
+            'every surface file in it, each its own entry under one heading.'});
 }
 
 /* Convert fibers: pick a tract file or a folder of them, then a name for the
@@ -1237,10 +1259,10 @@ async function pollConvert(){
       status(`converting ${j.name} … ${(j.progress*100).toFixed(0)}%`);
       setTimeout(pollConvert, 1200); return;
     }
-    if (j.kind === 'atlas' || j.kind === 'fibers'){
+    if (j.kind === 'atlas' || j.kind === 'fibers' || j.kind === 'mesh'){
       CAT = await getJSON('/api/catalogue');
       const small = (j.skipped || []).length;
-      const what = j.kind === 'atlas' ? 'region(s) too small to mesh' : 'file(s) without fibres';
+      const what = {atlas: 'region(s) too small to mesh', fibers: 'file(s) without fibres', mesh: 'file(s) that could not be read'}[j.kind];
       status('ready: ' + j.name + (small ? ` · ${small} ${what}: ${j.skipped.join(', ')}` : ''));
       const done = CONVERT_DONE; CONVERT_DONE = null;
       if (done) done(j.name);
@@ -1711,6 +1733,10 @@ function drawLighting(){
     r.oninput = () => { SPEC.lighting[k] = parseFloat(r.value); render(); };
     field(host, label, r);
   });
+  const occ = el('input'); occ.type = 'checkbox'; occ.checked = !!SPEC.lighting.occlusion;
+  occ.title = 'ambient occlusion: shade the creases where surfaces meet — sulci, region borders — for depth (not drawn with a volume body)';
+  occ.onchange = () => { SPEC.lighting.occlusion = occ.checked; render(); };
+  field(host, 'Ambient occlusion', occ);
   const par = el('input'); par.type = 'checkbox'; par.checked = !!SPEC.parallel;
   par.onchange = () => { SPEC.parallel = par.checked; render(); };
   field(host, 'Orthographic', par);
@@ -2204,11 +2230,13 @@ async function browse(path, kind){
   $('#m-up').onclick = () => browse(j.parent, kind);
 }
 /* ``folder`` adds "Use this folder", which answers with the folder shown. */
-function chooseFile(kind, start, cb, {folder = false, title = null} = {}){
+/* ``hint`` explains, inside the dialog, what the chosen file will be used for. */
+function chooseFile(kind, start, cb, {folder = false, title = null, hint = ''} = {}){
   chooserResolve = cb; chooserKind = kind;
   $('#m-title').textContent = title || {volume:'Choose a NIfTI', fibers:'Choose a fiber file',
                                save:'Save as', mesh:'Choose a mesh', pack:'Choose a content pack (.gnvpack)',
                                labels:'Choose a .txt or .lut naming the regions'}[kind] || 'Choose a file';
+  $('#m-hint').textContent = hint;
   $('#modal').classList.toggle('pick-many', folder);
   $('#m-name').value = '';
   $('#modal').classList.add('on');

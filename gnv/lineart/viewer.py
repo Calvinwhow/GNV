@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from gnv.onscreen import colours_on_points
+
 
 class View:
     """What is on screen right now, in the terms ``engine.draw`` wants."""
@@ -92,7 +94,7 @@ class View:
                     continue
                 if poly.GetNumberOfPolys() == 0 and poly.GetNumberOfStrips() == 0:
                     yield {"kind": "lines", "key": key,
-                           "make": lambda a=actor, p=poly: (p, _colours_on_points(a, p))}
+                           "make": lambda a=actor, p=poly: (p, colours_on_points(a, p))}
                     continue
                 yield {"kind": "surface", "key": key, "actor": actor, "poly": poly,
                        "role": "mesh" if kind == "mesh" else "other",
@@ -101,45 +103,14 @@ class View:
     # -- fibres ---------------------------------------------------------------
     def _fibre_lines(self, actor, tubes):
         """A fibre layer is drawn as swept tubes; line art wants the
-        streamlines inside them. They are found in the viewer's fibre cache --
-        the entry whose tubes share this actor's points -- and kept only for
-        the fibres actually drawn (gates and "values only" drop whole
-        streamlines, and the tubes carry each point's fibre id). Each line
-        point takes the colour of the nearest tube point, i.e. exactly the
-        colour on screen, however the layer is coloured."""
-        cache = getattr(self._session, "_fibers", {}) or {}
-        points_id = tubes.GetPoints().GetAddressAsString("vtkPoints") if tubes.GetPoints() else None
-        source = None
-        for entry in list(cache.values()):
-            drawn = entry.get("tubes") if isinstance(entry, dict) else None
-            if drawn is not None and drawn.GetPoints() is not None and \
-                    drawn.GetPoints().GetAddressAsString("vtkPoints") == points_id:
-                source = entry.get("lines")
-                break
-        if source is None or source.n_points == 0:
+        streamlines inside them, in the colours on screen (see
+        ``gnv.onscreen.fibre_streamlines``). Returned as a function, so they
+        are only gathered when line art has not already drawn them."""
+        from gnv.onscreen import fibre_source, fibre_streamlines
+
+        if fibre_source(self._session, tubes) is None:
             return None
-
-        def make(actor=actor, tubes=tubes, source=source):
-            import pyvista as pv
-            from scipy.spatial import cKDTree
-
-            lines = source
-            if "fiber" in tubes.point_data and "fiber" in lines.point_data:
-                shown = np.unique(np.asarray(tubes.point_data["fiber"]))
-                owner = np.asarray(lines.point_data["fiber"])
-                keep = np.isin(owner, shown)
-                if not keep.all():
-                    cells = _polyline_ids(lines)
-                    kept = [ids for ids in cells if len(ids) and keep[ids[0]]]
-                    lines = _rebuild(lines, kept)
-            colours = _colours_on_points(actor, tubes)
-            if colours.ndim == 2:
-                nearest = cKDTree(np.asarray(tubes.points)).query(
-                    np.asarray(lines.points), k=1)[1]
-                colours = colours[nearest]
-            return lines, colours
-
-        return make
+        return lambda actor=actor, tubes=tubes: fibre_streamlines(self._session, actor, tubes)
 
 
 def _slice_item(actor):
@@ -178,42 +149,6 @@ def _slice_item(actor):
     key = (actor.GetAddressAsString("vtkObject"), texture.GetAddressAsString("vtkObject"),
            int(image.GetMTime()), int(poly.GetMTime()))
     return {"kind": "slice", "key": key, "plane": plane, "rgba": rgba.reshape(h, w, 4)}
-
-
-def _colours_on_points(actor, poly):
-    """RGB (0..1) per point of ``poly`` as ``actor`` draws it, or one RGB."""
-    from vtk.util.numpy_support import vtk_to_numpy
-
-    mapper = actor.GetMapper()
-    if mapper is not None and mapper.GetScalarVisibility():
-        mapped = mapper.MapScalars(1.0)
-        if mapped is not None and mapped.GetNumberOfTuples() == poly.n_points:
-            return vtk_to_numpy(mapped).astype(float)[:, :3] / 255.0
-    return np.asarray(actor.GetProperty().GetColor(), float)
-
-
-def _polyline_ids(poly):
-    lines = np.asarray(poly.lines)
-    out, i = [], 0
-    while i < len(lines):
-        n = int(lines[i])
-        out.append(lines[i + 1:i + 1 + n])
-        i += n + 1
-    return out
-
-
-def _rebuild(poly, kept):
-    """A line PolyData of only the ``kept`` polylines (index arrays)."""
-    import pyvista as pv
-
-    if not kept:
-        return pv.PolyData()
-    used = np.concatenate(kept)
-    remap = np.full(poly.n_points, -1, np.int64)
-    remap[used] = np.arange(len(used))
-    cells = np.concatenate([np.r_[len(ids), remap[ids]] for ids in kept])
-    out = pv.PolyData(np.asarray(poly.points)[used], lines=cells)
-    return out
 
 
 def bring_up_to_date(session, size, camera):

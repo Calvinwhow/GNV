@@ -2400,6 +2400,17 @@ class RenderSession:
             pl.enable_anti_aliasing("fxaa")
         else:
             pl.disable_anti_aliasing()
+        # Ambient occlusion: creases where surfaces meet -- sulci, the borders
+        # between regions, a tract running into cortex -- are shaded, which is
+        # most of what reads as depth. Screen-space and quick, so it can stay on
+        # while you work. Its reach is a share of the scene's size, so it means
+        # the same on a nucleus and on a whole brain. Not with a volume body,
+        # which VTK's occlusion pass does not draw.
+        if self.spec["lighting"].get("occlusion") and not self._has_volume():
+            lo, hi = np.asarray(pl.bounds, float).reshape(3, 2).T
+            pl.enable_ssao(radius=0.02 * float(np.linalg.norm(hi - lo)) or 1.0, bias=0.05, kernel_size=128, blur=True)
+        else:
+            pl.disable_ssao()
 
         # A reused off-screen Plotter hands back the LAST RENDERED buffer:
         # screenshot() does not re-render for a camera move, so without this the

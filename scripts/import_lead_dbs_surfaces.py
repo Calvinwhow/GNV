@@ -6,61 +6,15 @@ surfaces are not shipped with the viewer."""
 from __future__ import annotations
 
 import argparse
-import gzip
-import struct
 from pathlib import Path
 
 import numpy as np
 import pyvista as pv
 from scipy.io import loadmat
 
+from gnv.convert.surface_meshes import polydata, read_mz3
 from gnv.resource_index import add_entry
 from gnv.paths import LIBRARY_DIR
-
-
-def polydata(points, triangles):
-    points = np.asarray(points, dtype=np.float32)
-    triangles = np.asarray(triangles, dtype=np.int64)
-    if points.ndim != 2 or points.shape[1] != 3:
-        raise ValueError(f"vertices must have shape (N, 3), got {points.shape}")
-    if triangles.ndim != 2 or triangles.shape[1] != 3:
-        raise ValueError(f"faces must have shape (N, 3), got {triangles.shape}")
-    if not np.isfinite(points).all():
-        raise ValueError("vertices contain non-finite coordinates")
-    if triangles.size and (triangles.min() < 0 or triangles.max() >= len(points)):
-        raise ValueError("a face index is outside the vertex array")
-    cells = np.empty((len(triangles), 4), dtype=np.int64)
-    cells[:, 0] = 3
-    cells[:, 1:] = triangles
-    return pv.PolyData(points, cells.ravel())
-
-
-def read_mz3(path):
-    """Read the face-and-vertex subset of the Surf-Ice MZ3 format."""
-    path = Path(path)
-    with path.open("rb") as probe:
-        compressed = probe.read(2) == b"\x1f\x8b"
-    opener = gzip.open if compressed else open
-    with opener(path, "rb") as stream:
-        header = stream.read(16)
-        if len(header) != 16:
-            raise ValueError(f"{path.name}: truncated MZ3 header")
-        magic, attributes, face_count, vertex_count, skip = struct.unpack(
-            "<HHIII", header)
-        if magic != 0x5A4D:
-            raise ValueError(f"{path.name}: bad MZ3 magic 0x{magic:04x}")
-        if attributes & 0x03 != 0x03:
-            raise ValueError(f"{path.name}: MZ3 has no face-and-vertex geometry")
-        stream.read(skip)
-        faces = np.frombuffer(stream.read(face_count * 3 * 4), dtype="<u4")
-        coordinate_type = "<f8" if attributes & 0x10 else "<f4"
-        itemsize = np.dtype(coordinate_type).itemsize
-        points = np.frombuffer(
-            stream.read(vertex_count * 3 * itemsize), dtype=coordinate_type)
-    if faces.size != face_count * 3 or points.size != vertex_count * 3:
-        raise ValueError(f"{path.name}: truncated MZ3 geometry")
-    return polydata(points.reshape(vertex_count, 3),
-                    faces.reshape(face_count, 3))
 
 
 def save(mesh, path):

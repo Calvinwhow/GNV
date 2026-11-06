@@ -28,7 +28,7 @@ from .spec import (
 )
 
 STATIC = Path(__file__).resolve().parent / "static"
-MESH_SUFFIXES = {".vtk", ".vtp", ".stl", ".ply", ".obj", ".gii"}
+MESH_SUFFIXES = {".vtk", ".vtp", ".stl", ".ply", ".obj", ".gii", ".mz3", ".mat"}
 VOLUME_SUFFIXES = {".nii", ".gz", ".npz"}
 LABEL_SUFFIXES = {".txt", ".lut", ".csv", ".tsv", ".json"}     # region-name tables (volume_meshes.read_label_table)
 FIBER_SUFFIXES = {".mat", ".npy", ".npz", ".tck", ".trk", ".trx", ".json"}
@@ -361,6 +361,18 @@ def create_app(spec=None, drop_dir=None):
         except Exception as exc:
             return _error(exc)
 
+    @app.post("/api/meshes/convert")
+    def api_convert_mesh():
+        """Start converting a surface file, or a folder of them, into the mesh
+        library. Returns at once; polled on the same job endpoint."""
+        from .backdrop_jobs import start_mesh
+
+        body = request.get_json(force=True)
+        try:
+            return jsonify(start_mesh(body["path"], body.get("name")))
+        except Exception as exc:
+            return _error(exc)
+
     @app.post("/api/fibers/convert")
     def api_build_fiber_set():
         """Start converting a tract file, or a folder of them, into a fibre set in
@@ -681,6 +693,13 @@ def create_app(spec=None, drop_dir=None):
         _attach_lineart(app, session, lock)
     except Exception as exc:
         print(f"gnv: line art add-on not loaded: {exc!r}")
+
+    # Optional add-on, self-contained in pathtrace/ (its own routes), the same way.
+    try:
+        from .pathtrace import attach as _attach_pathtrace
+        _attach_pathtrace(app, session, lock)
+    except Exception as exc:
+        print(f"gnv: path-traced add-on not loaded: {exc!r}")
 
     return app
 

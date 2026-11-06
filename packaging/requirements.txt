@@ -12,4 +12,5 @@ h5py
 pillow
 matplotlib
 scikit-image
+mitsuba
 pooch

@@ -133,29 +133,31 @@ def _camera_light(azimuth, elevation, intensity, color):
     return light
 
 
+def light_rig(key_azimuth=KEY_AZIMUTH, key_elevation=KEY_ELEVATION, key_intensity=KEY_INTENSITY, rig="studio"):
+    """The lights as ``[(azimuth, elevation, intensity, colour)]``, placed by
+    angle in camera space (see ``_camera_light``). ``rig="kit"`` is VTK's flat
+    five-light kit; otherwise the key, with the fill and rim relative to it."""
+    key = float(key_intensity)
+    if rig == "kit":
+        return [(azimuth, elevation, key * share, color) for azimuth, elevation, share, color in KIT_LIGHTS]
+    fill_daz, fill_el, fill_share = FILL_OFFSET
+    rim_daz, rim_el, rim_share = RIM_OFFSET
+    return [(key_azimuth, key_elevation, key, KEY_COLOR),
+            (key_azimuth + fill_daz, fill_el, key * fill_share, FILL_COLOR),
+            (key_azimuth + rim_daz, rim_el, key * rim_share, RIM_COLOR)]
+
+
 def add_lights(pl, key_azimuth=KEY_AZIMUTH, key_elevation=KEY_ELEVATION,
                key_intensity=KEY_INTENSITY, rig="studio", center=CENTER):
-    """Place the lights. ``rig="kit"`` swaps in VTK's flat five-light kit.
+    """Place the lights (see ``light_rig``).
 
     Every light follows the camera, so a region is lit the same way in a lateral
     view and an inferior one. A world-fixed key looks better in exactly one view
     and leaves the underside of the brain black.
     """
     pl.remove_all_lights()
-    key = float(key_intensity)
-
-    if rig == "kit":
-        for azimuth, elevation, share, color in KIT_LIGHTS:
-            pl.add_light(_camera_light(azimuth, elevation, key * share, color))
-        return
-
-    fill_daz, fill_el, fill_share = FILL_OFFSET
-    rim_daz, rim_el, rim_share = RIM_OFFSET
-    pl.add_light(_camera_light(key_azimuth, key_elevation, key, KEY_COLOR))
-    pl.add_light(_camera_light(key_azimuth + fill_daz, fill_el, key * fill_share,
-                               FILL_COLOR))
-    pl.add_light(_camera_light(key_azimuth + rim_daz, rim_el, key * rim_share,
-                               RIM_COLOR))
+    for azimuth, elevation, intensity, color in light_rig(key_azimuth, key_elevation, key_intensity, rig):
+        pl.add_light(_camera_light(azimuth, elevation, intensity, color))
 
 
 # -- colour -----------------------------------------------------------------

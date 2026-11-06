@@ -78,6 +78,7 @@ DEFAULT_LIGHTING = {
     "rig": "studio", "key_azimuth": 35.0, "key_elevation": 35.0,
     "key_intensity": 0.85,
     "specular": 0.22, "specular_power": 14.0, "ambient": 0.30, "diffuse": 0.78,
+    "occlusion": False,      # ambient occlusion: shade creases where surfaces meet (the "studio" look)
 }
 
 DEFAULT_CENTER = [0.0, -17.0, 5.0]

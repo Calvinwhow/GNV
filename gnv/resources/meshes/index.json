@@ -19,6 +19,7 @@
     {"name": "aal3_nocer", "section": "Atlases", "label": "AAL3 subcortical, no cerebellum", "hint": "AAL3 subcortical structures, without the cerebellum, 52 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/aal3_nocer"},
     {"name": "aseg", "section": "Atlases", "label": "FreeSurfer aseg", "hint": "FreeSurfer aseg subcortical structures, 14 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/aseg"},
     {"name": "tian2020_s1", "section": "Atlases", "label": "Tian 2020, scale 1", "hint": "Melbourne subcortex atlas (Tian 2020), scale 1, 16 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/tian2020_s1"},
-    {"name": "musus100", "section": "Atlases", "label": "MuSus-100", "hint": "MuSus-100 deep brain nuclei and thalamic subregions (He et al. 2023), 84 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/musus100"}
+    {"name": "musus100", "section": "Atlases", "label": "MuSus-100", "hint": "MuSus-100 deep brain nuclei and thalamic subregions (He et al. 2023), 84 region meshes (from yabplot)", "family": "subcortex", "parcels": "atlases/musus100"},
+    {"name": "leaddbs_surf", "section": "Lead-DBS surfaces", "label": "Combined cortex", "hint": "Lead-DBS combined cortical surface", "family": "surface", "pieces": ["brain_surfaces/lead_dbs/surf.vtp"]}
   ]
 }

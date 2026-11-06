@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Lock, Thread
 
-from .paths import ATLAS_DIR, BACKDROP_DIR, FIBER_DIR, add_entry, entries, index
+from .paths import ATLAS_DIR, BACKDROP_DIR, FIBER_DIR, SURFACE_DIR, add_entry, entries, index
 
 _state = {"running": False, "progress": 0.0, "name": None,
           "error": None, "path": None, "kind": None, "skipped": [], "result": None}
@@ -132,6 +132,60 @@ def _run_atlas(source, out, label, table):
         add_entry("meshes", {"name": out.name, "section": "Converted atlases", "label": label, "hint": hint, "family": "subcortex", "parcels": f"atlases/{out.name}"})
         with _lock:
             _state.update(running=False, progress=1.0, path=str(out), skipped=result["skipped"])
+    except Exception as exc:
+        with _lock:
+            _state.update(running=False, error=f"{type(exc).__name__}: {exc}")
+
+
+def start_mesh(source, name):
+    """Convert a surface file, or a folder of them, into ``SURFACE_DIR`` in the
+    background (see ``surface_meshes``) and enter each in the library's mesh
+    index. A file is listed under ``name`` as typed; the files of a folder are
+    listed in a section called ``name``, each by its file name. No name may be
+    taken by a mesh already listed."""
+    from gnv.convert.surface_meshes import SURFACE_SUFFIXES, entry_labels, entry_name, surface_files
+
+    source = Path(source).expanduser()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    label = str(name or "").strip()
+    base = entry_name(label)
+    if not base:
+        raise ValueError("the mesh needs a name")
+    files = surface_files(source)
+    if not files:
+        raise ValueError(f"{source.name} holds no surface files ({' '.join(SURFACE_SUFFIXES)})")
+    labels = [label] if source.is_file() else entry_labels(files)
+    names = [base] if source.is_file() else [entry_name(f"{base}_{text}") for text in labels]
+    taken = [n for n in names if n in entries("meshes")]
+    if taken:
+        raise FileExistsError(f"there is already a mesh called {taken[0]!r}; choose another name")
+    _begin("mesh", base)
+    Thread(target=_run_mesh, args=(files, names, labels, label, source.is_file()), daemon=True).start()
+    return status()
+
+
+def _run_mesh(files, names, labels, label, single):
+    from gnv.convert.surface_meshes import convert_mesh
+
+    try:
+        made, skipped = [], []
+        for i, (path, name, text) in enumerate(zip(files, names, labels)):
+            try:
+                out = convert_mesh(path, SURFACE_DIR / name)
+            except Exception as exc:                 # one unreadable file does not stop a folder
+                skipped.append(f"{path.name} ({exc})")
+                continue
+            piece = out["piece"].relative_to(SURFACE_DIR.parent).as_posix()
+            add_entry("meshes", {"name": name, "section": "Converted meshes" if single else label, "label": text,
+                                 "hint": f"{out['points']:,} points, {out['triangles']:,} triangles, from {path.name}", "family": "surface", "pieces": [piece]})
+            made.append(name)
+            _report((i + 1) / len(files))
+        if not made:
+            raise ValueError("no surface could be read: " + "; ".join(skipped))
+        with _lock:
+            # The job's name is the mesh to select when it is done: the first one made.
+            _state.update(running=False, progress=1.0, name=made[0], path=str(SURFACE_DIR / made[0]), skipped=skipped)
     except Exception as exc:
         with _lock:
             _state.update(running=False, error=f"{type(exc).__name__}: {exc}")

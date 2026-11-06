@@ -12,7 +12,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 ROOT = Path(SPECPATH).parent
 PACKAGE = ROOT / "gnv"
@@ -31,17 +31,28 @@ def folder(source, dest):
 datas = (
     folder(PACKAGE / "static", "gnv/static")
     + folder(PACKAGE / "lineart" / "static", "gnv/lineart/static")
+    + folder(PACKAGE / "pathtrace" / "static", "gnv/pathtrace/static")
     + folder(PACKAGE / "volumes", "gnv/volumes")
     + folder(RESOURCES, "gnv/resources")
 )
+
+# The path tracer (gnv/pathtrace): Mitsuba and its JIT, Dr.Jit, load their
+# render modes and plugins by name at run time, so both come whole.
+binaries, mitsuba_imports = [], []
+for name in ("mitsuba", "drjit"):
+    found_datas, found_binaries, found_imports = collect_all(name)
+    datas += found_datas
+    binaries += found_binaries
+    mitsuba_imports += found_imports
 
 a = Analysis(
     [str(ROOT / "scripts" / "launch.py")],
     pathex=[str(ROOT)],
     datas=datas,
+    binaries=binaries,
     # Imported by name at run time, out of the analyser's sight. (All of VTK
     # comes along regardless: the viewer imports it as ``import vtk``.)
-    hiddenimports=collect_submodules("gnv"),
+    hiddenimports=collect_submodules("gnv") + mitsuba_imports,
     # Optional imports of the libraries above that the viewer never uses.
     excludes=["torch", "jax", "tensorflow", "keras", "IPython", "notebook", "jupyterlab", "cv2", "imageio_ffmpeg", "sklearn", "tkinter"],
     noarchive=False,

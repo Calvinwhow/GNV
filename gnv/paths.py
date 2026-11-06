@@ -59,6 +59,7 @@ USER_DIR = _user_dir()
 LIBRARY_DIR = _library_dir()
 BACKDROP_DIR = LIBRARY_DIR / "backdrops"            # where converted backdrops are written
 ATLAS_DIR = LIBRARY_DIR / "meshes" / "atlases"      # where converted atlases are written
+SURFACE_DIR = LIBRARY_DIR / "meshes" / "surfaces"   # where converted surface meshes are written
 FIBER_DIR = LIBRARY_DIR / "fibers"                  # where converted fibre sets are written
 ELECTRODE_DIR = RESOURCE_DIR / "electrodes"
 
