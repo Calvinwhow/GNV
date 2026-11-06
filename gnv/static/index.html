@@ -264,11 +264,14 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 </div></div>
 
 <script src="/static/app.js"></script>
-<!-- Optional add-on (gnv/lineart/): adds its own Line art button
-     and panel. Delete this line to remove it. -->
-<script src="/lineart/lineart.js"></script>
-<!-- Optional add-on (gnv/pathtrace/): adds its own Path traced button
-     and panel. Delete this line to remove it. -->
-<script src="/pathtrace/pathtrace.js"></script>
+<!-- Add-ons (gnv/addons.py): the server lists those that loaded; each one's
+     script adds its own button and panel. Added in order, after app.js. -->
+<script>
+fetch('/api/addons').then(r => r.json()).then(list => list.forEach(a => {
+  if (!a.loaded) { console.info(`gnv add-on ${a.label} not loaded: ${a.reason}`); return; }
+  if (!a.script) return;
+  const s = document.createElement('script'); s.src = a.script; s.async = false; document.body.appendChild(s);
+})).catch(() => {});
+</script>
 </body>
 </html>

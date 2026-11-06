@@ -30,20 +30,24 @@ def folder(source, dest):
 
 datas = (
     folder(PACKAGE / "static", "gnv/static")
-    + folder(PACKAGE / "lineart" / "static", "gnv/lineart/static")
-    + folder(PACKAGE / "pathtrace" / "static", "gnv/pathtrace/static")
     + folder(PACKAGE / "volumes", "gnv/volumes")
     + folder(RESOURCES, "gnv/resources")
 )
 
-# The path tracer (gnv/pathtrace): Mitsuba and its JIT, Dr.Jit, load their
-# render modes and plugins by name at run time, so both come whole.
-binaries, mitsuba_imports = [], []
+# Add-ons (gnv/addons.py) are not built in -- they are installed into the
+# user's library and imported from there -- but everything they use ships with
+# the viewer, so an add-on only unlocks what is already here. The libraries
+# only add-ons import are named here, out of the analyser's sight otherwise.
+ADDON_IMPORTS = ["matplotlib.backends.backend_agg", "matplotlib.collections", "matplotlib.figure", "scipy.ndimage", "scipy.spatial", "PIL.Image"]
+
+# The path tracer: Mitsuba and its JIT, Dr.Jit, load their render modes and
+# plugins by name at run time, so both come whole.
+binaries = []
 for name in ("mitsuba", "drjit"):
     found_datas, found_binaries, found_imports = collect_all(name)
     datas += found_datas
     binaries += found_binaries
-    mitsuba_imports += found_imports
+    ADDON_IMPORTS += found_imports
 
 a = Analysis(
     [str(ROOT / "scripts" / "launch.py")],
@@ -52,7 +56,7 @@ a = Analysis(
     binaries=binaries,
     # Imported by name at run time, out of the analyser's sight. (All of VTK
     # comes along regardless: the viewer imports it as ``import vtk``.)
-    hiddenimports=collect_submodules("gnv") + mitsuba_imports,
+    hiddenimports=collect_submodules("gnv") + ADDON_IMPORTS,
     # Optional imports of the libraries above that the viewer never uses.
     excludes=["torch", "jax", "tensorflow", "keras", "IPython", "notebook", "jupyterlab", "cv2", "imageio_ffmpeg", "sklearn", "tkinter"],
     noarchive=False,

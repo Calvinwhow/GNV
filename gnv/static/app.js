@@ -2126,7 +2126,8 @@ async function afterLibraryChange(){
 }
 function reportInstall(name, r){
   const skipped = (r.skipped || []).map(s => `${s.name} (${s.reason})`);
-  status(`${name}: installed ${r.installed.length ? r.installed.join(', ') : 'nothing'}` + (skipped.length ? ' · skipped ' + skipped.join(', ') : ''), !r.installed.length);
+  status(`${name}: installed ${r.installed.length ? r.installed.join(', ') : 'nothing'}` + (skipped.length ? ' · skipped ' + skipped.join(', ') : '') +
+         (r.restart ? ' · restart the viewer to turn the add-on on' : ''), !r.installed.length);
 }
 async function installPackAt(path, name){
   const j = await runJob(() => postJSON('/api/packs/install', {path}));
@@ -2147,10 +2148,10 @@ async function drawLibrary(){
   install.onclick = () => chooseFile('pack', $('#m-path').value, async p => {
     try { await installPackAt(p, p.split('/').pop()); await afterLibraryChange(); } catch (e) { status(e.message, true); } });
   const make = el('button', null, 'Make pack from ticked …');
-  make.title = 'write the ticked meshes, backdrops and fiber sets to one .gnvpack file, to give to someone';
+  make.title = 'write the ticked meshes, backdrops, fiber sets and add-ons to one .gnvpack file, to give to someone';
   make.onclick = () => {
     const items = ticked.filter(t => t.box.checked).map(t => t.item);
-    if (!items.length){ status('tick the meshes, backdrops or fiber sets to put in the pack', true); return; }
+    if (!items.length){ status('tick the meshes, backdrops, fiber sets or add-ons to put in the pack', true); return; }
     chooseFile('save', $('#m-path').value, async p => {
       if (!PACK_RE.test(p)) p += '.gnvpack';
       const notes = prompt('Notes for whoever installs it — where the data come from, how to cite it, its licence (optional):', '');
@@ -2180,14 +2181,16 @@ async function drawLibrary(){
   };
   const routes = el('div', 'inline'); routes.append(install, make, squeeze);
   host.appendChild(routes);
-  for (const [kind, title, list] of [['meshes', 'Meshes', lib.meshes], ['backdrops', 'Backdrops', lib.backdrops], ['fibers', 'Fiber sets', lib.fibers || []]]){
+  for (const [kind, title, list] of [['meshes', 'Meshes', lib.meshes], ['backdrops', 'Backdrops', lib.backdrops], ['fibers', 'Fiber sets', lib.fibers || []], ['addons', 'Add-ons', lib.addons || []]]){
     host.appendChild(el('div', 'lib-head', title));
     if (!list.length) host.appendChild(el('div', 'hint', 'none yet'));
     list.forEach(it => {
       const row = el('label', 'region');
       const box = el('input'); box.type = 'checkbox';
       row.title = it.section + ' · ' + it.name;
-      row.append(box, el('span', null, it.label), el('span', 'lib-tag', (it.shipped ? 'built in · ' : '') + (it.compressed ? 'compressed · ' : '') + (it.bytes ? fmtBytes(it.bytes) : 'files missing')));
+      const addon = kind === 'addons' ? `v${it.version} · ${it.loaded ? 'on' : 'off'} · ` : '';
+      row.append(box, el('span', null, it.label), el('span', 'lib-tag', addon + (it.shipped ? 'built in · ' : '') + (it.compressed ? 'compressed · ' : '') + (it.bytes ? fmtBytes(it.bytes) : 'files missing')));
+      if (it.reason) row.title += ' · ' + it.reason;
       if (!it.bytes || it.compressed) box.disabled = true;
       if (it.compressed) row.title += ' · compressed: choose it in a layer to unpack it before putting it in a pack';
       host.appendChild(row);
@@ -2195,7 +2198,8 @@ async function drawLibrary(){
     });
   }
   host.appendChild(el('div', 'hint', 'Your conversions and installed packs are kept in ' + lib.dir + ', each listed in its folder\'s index.json' +
-    '. Drop a .gnvpack on the view to install it; Install pack reads a big one in place instead of copying it through the page.'));
+    '. Drop a .gnvpack on the view to install it; Install pack reads a big one in place instead of copying it through the page.' +
+    ' Add-ons are the folders in ' + lib.dir + '/addons; one that is installed turns on when the viewer next starts.'));
 }
 $('#librarypanel').addEventListener('toggle', () => { if ($('#librarypanel').open) drawLibrary(); });
 

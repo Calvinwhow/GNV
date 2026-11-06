@@ -686,20 +686,14 @@ def create_app(spec=None, drop_dir=None):
         return jsonify({"path": str(root), "parent": str(root.parent),
                         "entries": entries[:2000]})
 
-    # Optional add-on, self-contained in lineart/ (its own routes). Delete
-    # these lines to remove it; the viewer runs the same with or without it.
-    try:
-        from .lineart import attach as _attach_lineart
-        _attach_lineart(app, session, lock)
-    except Exception as exc:
-        print(f"gnv: line art add-on not loaded: {exc!r}")
+    # Add-ons in the library (gnv/addons.py): each attaches its own routes, and
+    # the page adds the scripts of those that loaded.
+    from . import addons
+    addons.load(app, session, lock)
 
-    # Optional add-on, self-contained in pathtrace/ (its own routes), the same way.
-    try:
-        from .pathtrace import attach as _attach_pathtrace
-        _attach_pathtrace(app, session, lock)
-    except Exception as exc:
-        print(f"gnv: path-traced add-on not loaded: {exc!r}")
+    @app.get("/api/addons")
+    def api_addons():
+        return jsonify(addons.report())
 
     return app
 

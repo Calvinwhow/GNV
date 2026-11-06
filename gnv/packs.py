@@ -12,16 +12,20 @@ its index entry:
     meshes/brain_surfaces/lead_dbs/surf.vtp  a surface's files
     backdrops/full16_100um.npz               a backdrop, with its volume levels if built
     fibers/rajamani2025/...                  a fibre set: three files per tract
+    addons/pathtrace/...                     an add-on: its whole folder (see addons.py)
 
 ``notes`` is free text from whoever made the pack: where the data came from,
 how to cite it, its licence. Any mesh, backdrop or fibre set the indexes list
-can be packed: atlases, surfaces, backdrops, fibre sets.
+can be packed: atlases, surfaces, backdrops, fibre sets -- and any add-on in
+the library's addons/ folder.
 
 Installing puts each item's files in this user's library and its entry in the
 library's index, under the section it came from. An item whose name the viewer
 already lists is left alone and reported -- never overwritten. Each item is
 unpacked beside its destination and moved into place, so a failed install leaves
-nothing half-made.
+nothing half-made. An add-on is the exception to never overwriting: a pack
+holding a newer version replaces the installed one. Either way it is switched
+on when the viewer next starts.
 
 Members are stored, not compressed: the meshes are small and a backdrop is
 already compressed, and a stored member unpacks at copy speed even when it is
@@ -42,6 +46,7 @@ FORMAT = "gnv pack"
 VERSION = 2
 SUFFIX = ".gnvpack"
 KINDS = ("meshes", "backdrops", "fibers")
+ADDONS = "addons"
 
 
 def _entry_paths(entry):
@@ -66,6 +71,23 @@ def _item_files(kind, entry):
     return out
 
 
+def _addon(name):
+    """The add-on ``name`` in this user's library: its addon.json, with "folder"."""
+    from .addons import manifests
+
+    found = {info["name"]: info for info in manifests()}.get(name)
+    if found is None:
+        raise FileNotFoundError(f"there is no add-on called {name!r}")
+    return found
+
+
+def _addon_files(info):
+    """``[(file on disk, path inside the pack)]`` for an add-on: its folder, without caches or hidden files."""
+    folder = info["folder"]
+    keep = lambda p: p.is_file() and not any(part.startswith(".") or part == "__pycache__" for part in p.relative_to(folder).parts)
+    return [(p, f"{ADDONS}/{info['name']}/{p.relative_to(folder).as_posix()}") for p in sorted(folder.rglob("*")) if keep(p)]
+
+
 def make_pack(items, out_path, title="", notes="", progress=None):
     """Write indexed ``items`` (``[{"kind", "name"}]``) to the pack ``out_path``.
     Returns ``{"path", "items", "bytes"}``."""
@@ -77,8 +99,13 @@ def make_pack(items, out_path, title="", notes="", progress=None):
     listed, files = [], []
     for item in items:
         kind, name = str(item["kind"]), str(item["name"])
+        if kind == ADDONS:
+            info = _addon(name)
+            files += _addon_files(info)
+            listed.append({"kind": kind, "name": name, "entry": {"name": name, "label": info.get("label", name), "version": info.get("version", "")}})
+            continue
         if kind not in KINDS:
-            raise ValueError(f"an item's kind is one of {KINDS}, not {kind!r}")
+            raise ValueError(f"an item's kind is one of {KINDS + (ADDONS,)}, not {kind!r}")
         entry = entries(kind).get(name)
         if entry is None:
             raise FileNotFoundError(f"there is no {kind[:-1]} called {name!r}")
@@ -125,12 +152,51 @@ def _safe(rel):
     return bool(parts) and not str(rel).startswith("/") and ".." not in parts and "\\" not in str(rel)
 
 
+def _install_addon(pack, members, name, version):
+    """Unpack the add-on ``name`` from ``pack`` into the library's addons/,
+    replacing an older version. Returns why it was not installed, or None."""
+    from .addons import ADDON_DIR, manifests, version_key
+
+    if not name.isidentifier():
+        return "its name is not one an add-on can have"
+    prefix = f"{ADDONS}/{name}/"
+    mine = [m for m in members if m.filename.startswith(prefix)]
+    if prefix + "addon.json" not in {m.filename for m in mine}:
+        return "its files are missing from the pack"
+    installed = {info["name"]: info for info in manifests()}.get(name)
+    if installed is not None and version_key(installed.get("version", "0")) >= version_key(version or "0"):
+        return f"version {installed.get('version') or '?'} is already installed"
+    ADDON_DIR.mkdir(parents=True, exist_ok=True)
+    target = ADDON_DIR / name
+    staging, old = ADDON_DIR / f".{name}.{os.getpid()}.installing", ADDON_DIR / f".{name}.{os.getpid()}.replaced"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        for m in mine:
+            dest = staging / m.filename[len(prefix):]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with pack.open(m) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out, 1 << 22)
+        if target.exists():
+            os.replace(target, old)
+        try:
+            os.replace(staging, target)
+        except OSError:
+            if old.exists():
+                os.replace(old, target)
+            raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(old, ignore_errors=True)
+    return None
+
+
 def install_pack(path, progress=None):
     """Put every item of the pack at ``path`` into this user's library and its
-    index. Returns ``{"installed": [names], "skipped": [{"name", "reason"}], "notes"}``."""
+    index. Returns ``{"installed": [names], "skipped": [{"name", "reason"}], "notes", "restart"}``;
+    ``restart`` is true when an add-on was installed, which the viewer switches on when it next starts."""
     manifest = read_manifest(path)
     report = progress or (lambda fraction: None)
-    installed, skipped = [], []
+    installed, skipped, restart = [], [], False
     with zipfile.ZipFile(Path(path).expanduser()) as pack:
         members = [m for m in pack.infolist() if not m.is_dir()]
         for m in members:
@@ -140,6 +206,14 @@ def install_pack(path, progress=None):
         done = 0
         for item in manifest.get("items", []):
             kind, name, entry = item.get("kind"), str(item.get("name")), dict(item.get("entry") or {})
+            if kind == ADDONS:
+                reason = _install_addon(pack, members, name, str(entry.get("version", "")))
+                if reason is None:
+                    installed.append(name)
+                    restart = True
+                else:
+                    skipped.append({"name": name, "reason": reason})
+                continue
             if kind not in KINDS or entry.get("name") != name or not all(_safe(r) for r in _entry_paths(entry)):
                 skipped.append({"name": name, "reason": "its manifest entry is not one this viewer can read"})
                 continue
@@ -172,12 +246,13 @@ def install_pack(path, progress=None):
                 shutil.rmtree(staging, ignore_errors=True)
             add_entry(kind, {"name": name, "section": entry.get("section", "Installed"), **entry})
             installed.append(name)
-    return {"installed": installed, "skipped": skipped, "notes": manifest.get("notes", "")}
+    return {"installed": installed, "skipped": skipped, "notes": manifest.get("notes", ""), "restart": restart}
 
 
 def library():
     """Everything a pack can be made from, in dropdown order:
-    ``{"dir", "meshes": [...], "backdrops": [...]}``, each ``{"name", "label", "section", "shipped", "bytes"}``."""
+    ``{"dir", "meshes": [...], "backdrops": [...], "fibers": [...], "addons": [...]}``, each
+    ``{"name", "label", "section", "shipped", "bytes"}``; an add-on also has "version", "loaded" and "reason"."""
     def size(kind, entry):
         try:
             return sum(p.stat().st_size for p, _ in _item_files(kind, entry))
@@ -190,4 +265,20 @@ def library():
     for item in listing.get("backdrops", []):
         if item["name"] in compressed:
             item.update(compressed=True, bytes=compressed[item["name"]].stat().st_size)
+    listing[ADDONS] = _addon_listing()
     return {"dir": str(LIBRARY_DIR), **listing}
+
+
+def _addon_listing():
+    """Each add-on in the library, and whether it is on: one installed since the
+    viewer started is off until the next start."""
+    from .addons import manifests, report
+
+    started = {entry["name"]: entry for entry in report()}
+    out = []
+    for info in manifests():
+        entry = started.get(info["name"], {"loaded": False, "reason": "installed: restart the viewer to turn it on"})
+        if info["name"] in started and entry["version"] != info.get("version", ""):
+            entry = dict(entry, reason=f"version {info.get('version')} installed: restart the viewer to use it (version {entry['version']} is running)")
+        out.append({"name": info["name"], "label": info.get("label", info["name"]), "section": "Add-ons", "shipped": False, "version": info.get("version", ""), "bytes": sum(path.stat().st_size for path, _ in _addon_files(info)), "loaded": entry["loaded"], "reason": entry["reason"]})
+    return out
